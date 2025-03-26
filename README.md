@@ -180,23 +180,6 @@ err = subscription.Unsubscribe(ctx)
 
 ## Advanced Usage
 
-### Creating a Bus With Custom Options
-
-```go
-// Create a go-que Queue
-goq, err := pg.New(db)
-if err != nil {
-    log.Fatalf("Failed to create go-que: %v", err)
-}
-
-// Create a bus with custom options
-bus, err := bus.NewWithOptions(bus.BusImplOptions{
-    Dialect: pgbus.NewDialect(db),
-    GoQue:   goq,
-    Migrate: false,
-})
-```
-
 ### Using Random Queue Names for Distributed Broadcast Reception
 
 In distributed environments (like Kubernetes), when you need to ensure that each instance receives the same broadcast message, you can create queues with random names for each instance. This way, each instance will independently receive the same message, achieving a broadcast effect.

@@ -178,23 +178,6 @@ err = subscription.Unsubscribe(ctx)
 
 ## 高级用法
 
-### 使用自定义选项创建总线
-
-```go
-// 创建 go-que Queue
-goq, err := pg.New(db)
-if err != nil {
-    log.Fatalf("创建 go-que 失败: %v", err)
-}
-
-// 使用自定义选项创建总线
-bus, err := bus.NewWithOptions(bus.BusImplOptions{
-    Dialect: pgbus.NewDialect(db),
-    GoQue:   goq,
-    Migrate: false,
-})
-```
-
 ### 使用随机队列名实现分布式广播接收
 
 在分布式环境（如 Kubernetes）中，当需要确保集群中的每个实例都能接收到相同的广播消息时，可以为每个实例创建具有随机名称的队列。这样，每个实例都能独立接收到相同的消息，从而实现广播效果。

@@ -1,0 +1,297 @@
+package pgbus
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"strings"
+	"time"
+
+	"github.com/pkg/errors"
+	"github.com/qor5/go-bus"
+	"github.com/tnclong/go-que"
+	"github.com/tnclong/go-que/pg"
+)
+
+var _ bus.Dialect = (*Dialect)(nil)
+
+// Dialect is a PostgreSQL-specific implementation of the bus.Dialect interface.
+// It provides database operations for the message bus using PostgreSQL.
+type Dialect struct {
+	db  *sql.DB
+	goq que.Queue
+}
+
+// NewDialect creates a new PostgreSQL-specific implementation of the bus.Dialect interface.
+// It requires a valid PostgreSQL database connection.
+func NewDialect(db *sql.DB) (*Dialect, error) {
+	goq, err := pg.New(db)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create GoQue instance")
+	}
+	return &Dialect{
+		db:  db,
+		goq: goq,
+	}, nil
+}
+
+// GoQue returns the underlying GoQue instance.
+func (d *Dialect) GoQue() que.Queue {
+	return d.goq
+}
+
+// BeginTx starts a transaction.
+func (d *Dialect) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return d.db.BeginTx(ctx, opts)
+}
+
+// Migrate creates the subscriptions table and indexes.
+func (d *Dialect) Migrate(ctx context.Context) error {
+	_, err := d.db.ExecContext(ctx, `
+    CREATE TABLE IF NOT EXISTS gobus_subscriptions (
+        id SERIAL PRIMARY KEY,
+        queue VARCHAR(100) NOT NULL CHECK (char_length(TRIM(queue)) > 0 AND char_length(queue) <= 100),
+        pattern VARCHAR(255) NOT NULL,
+        regex_pattern VARCHAR(1024) NOT NULL,
+        plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        UNIQUE (queue, pattern)
+    );
+    
+    -- Index for queue lookups
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_queue_idx 
+        ON gobus_subscriptions (queue);
+    `)
+	if err != nil {
+		return errors.Wrap(err, "failed to create subscriptions table and indexes")
+	}
+	return nil
+}
+
+// scanSubscriptionsInternal scans rows and converts them to subscription objects
+func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) {
+	var subscriptions []bus.Subscription
+	for rows.Next() {
+		var sub subscription
+		var planData []byte
+
+		if err := rows.Scan(
+			&sub.id,
+			&sub.queue,
+			&sub.pattern,
+			&sub.regexPattern,
+			&planData,
+			&sub.createdAt,
+			&sub.updatedAt,
+		); err != nil {
+			return nil, errors.Wrap(err, "failed to scan subscription")
+		}
+
+		sub.d = d
+
+		if err := json.Unmarshal(planData, &sub.plan); err != nil {
+			return nil, errors.Wrap(err, "failed to deserialize subscription plan")
+		}
+
+		subscriptions = append(subscriptions, &sub)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "error iterating subscriptions")
+	}
+
+	return subscriptions, nil
+}
+
+// BySubject finds all subscriptions that match the given subject.
+func (d *Dialect) BySubject(ctx context.Context, subject string) ([]bus.Subscription, error) {
+	if err := bus.ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+
+	rows, err := d.db.QueryContext(
+		ctx,
+		`SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at
+         FROM gobus_subscriptions
+         WHERE $1 ~ regex_pattern
+         ORDER BY id ASC`,
+		subject,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to query subscriptions")
+	}
+	defer rows.Close()
+
+	return d.scanSubscriptions(rows)
+}
+
+// ByQueue finds all subscriptions for a specific queue.
+func (d *Dialect) ByQueue(ctx context.Context, queue string) ([]bus.Subscription, error) {
+	if strings.TrimSpace(queue) == "" {
+		return nil, errors.Wrap(bus.ErrInvalidQueue, "queue cannot be empty")
+	}
+
+	rows, err := d.db.QueryContext(
+		ctx,
+		`SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at
+         FROM gobus_subscriptions
+         WHERE queue = $1
+         ORDER BY id ASC`,
+		queue,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to query subscriptions")
+	}
+	defer rows.Close()
+
+	return d.scanSubscriptions(rows)
+}
+
+func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) (*subscription, error) {
+	rows, err := d.db.QueryContext(
+		ctx,
+		`SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at
+         FROM gobus_subscriptions
+         WHERE queue = $1 AND pattern = $2
+         ORDER BY id ASC`,
+		queue, pattern,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to query subscription")
+	}
+	defer rows.Close()
+
+	subs, err := d.scanSubscriptions(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(subs) == 0 {
+		return nil, bus.ErrSubscriptionNotFound
+	}
+
+	return subs[0].(*subscription), nil
+}
+
+// Upsert creates or updates a subscription.
+func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig bus.PlanConfig) (bus.Subscription, error) {
+	if strings.TrimSpace(queue) == "" {
+		return nil, errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
+	}
+
+	regexPattern, err := bus.ToRegexPattern(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	planData, err := json.Marshal(planConfig)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to serialize subscription plan")
+	}
+
+	existingSub, err := d.byQueueAndPattern(ctx, queue, pattern)
+	if err != nil && !errors.Is(err, bus.ErrSubscriptionNotFound) {
+		return nil, err
+	}
+
+	if existingSub != nil {
+		if existingSub.pattern == pattern &&
+			existingSub.queue == queue &&
+			existingSub.regexPattern == regexPattern &&
+			planConfig.Equal(existingSub.plan) {
+			return existingSub, nil
+		}
+	}
+
+	rows, err := d.db.QueryContext(
+		ctx,
+		`INSERT INTO gobus_subscriptions 
+         (queue, pattern, regex_pattern, plan, created_at, updated_at) 
+         VALUES ($1, $2, $3, $4, NOW(), NOW())
+         ON CONFLICT (queue, pattern) 
+         DO UPDATE SET 
+            regex_pattern = EXCLUDED.regex_pattern,
+            plan = EXCLUDED.plan,
+            updated_at = NOW()
+		RETURNING id, queue, pattern, regex_pattern, plan, created_at, updated_at`,
+		queue, pattern, regexPattern, planData,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to insert or update subscription")
+	}
+	defer rows.Close()
+
+	subs, err := d.scanSubscriptions(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(subs) == 0 {
+		return nil, bus.ErrSubscriptionNotFound
+	}
+
+	return subs[0], nil
+}
+
+// Delete removes a subscription for the given queue and pattern.
+func (d *Dialect) Delete(ctx context.Context, queue, pattern string) error {
+	if strings.TrimSpace(queue) == "" {
+		return errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
+	}
+
+	if err := bus.ValidatePattern(pattern); err != nil {
+		return err
+	}
+
+	_, err := d.db.ExecContext(
+		ctx,
+		`DELETE FROM gobus_subscriptions 
+         WHERE queue = $1 AND pattern = $2`,
+		queue, pattern,
+	)
+	if err != nil {
+		return errors.Wrap(err, "failed to delete subscription")
+	}
+
+	return nil
+}
+
+var _ bus.Subscription = (*subscription)(nil)
+
+// subscription is an implementation of the Subscription interface.
+type subscription struct {
+	id           int64
+	queue        string
+	pattern      string
+	d            *Dialect
+	regexPattern string
+	plan         bus.PlanConfig
+	createdAt    time.Time
+	updatedAt    time.Time
+}
+
+// ID returns the unique identifier of the subscription.
+func (s *subscription) ID() int64 {
+	return s.id
+}
+
+// Queue returns the name of the queue that receives messages.
+func (s *subscription) Queue() string {
+	return s.queue
+}
+
+// Pattern returns the subject pattern this subscription matches against.
+func (s *subscription) Pattern() string {
+	return s.pattern
+}
+
+// PlanConfig returns the plan configuration for this subscription.
+func (s *subscription) PlanConfig() bus.PlanConfig {
+	return s.plan
+}
+
+// Unsubscribe removes this subscription.
+func (s *subscription) Unsubscribe(ctx context.Context) error {
+	return s.d.Delete(ctx, s.queue, s.pattern)
+}

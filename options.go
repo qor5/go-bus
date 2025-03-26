@@ -39,8 +39,8 @@ var DefaultWorkerConfig = WorkerConfig{
 // that can be enqueued in a single transaction.
 var DefaultMaxEnqueuePerBatch = 100
 
-// DefaultBackOffFactory generates the default backoff strategy for worker reconnection.
-var DefaultBackOffFactory = func() backoff.BackOff {
+// DefaultConsumeBackOffFactory generates the default backoff strategy for worker reconnection.
+var DefaultConsumeBackOffFactory = func() backoff.BackOff {
 	expBackoff := backoff.NewExponentialBackOff()
 	expBackoff.InitialInterval = 1 * time.Second
 	expBackoff.MaxInterval = 30 * time.Second

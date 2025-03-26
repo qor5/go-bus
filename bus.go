@@ -98,7 +98,7 @@ func (q *QueueImpl) Consume(_ context.Context, handler Handler, opts ...ConsumeO
 	if consumeOpts.Backoff != nil {
 		bkoff = consumeOpts.Backoff
 	} else {
-		bkoff = DefaultBackOffFactory()
+		bkoff = DefaultConsumeBackOffFactory()
 	}
 
 	startWorker := func() (*que.Worker, error) {

@@ -13,10 +13,10 @@ import (
 
 // DefaultRetryPolicy provides a default retry policy for published messages.
 var DefaultRetryPolicy = que.RetryPolicy{
-	InitialInterval:        1 * time.Second,
-	MaxInterval:            100 * time.Second,
-	NextIntervalMultiplier: 1,
-	IntervalRandomPercent:  0,
+	InitialInterval:        30 * time.Second,
+	MaxInterval:            600 * time.Second,
+	NextIntervalMultiplier: 2,
+	IntervalRandomPercent:  33,
 	MaxRetryCount:          3,
 }
 
@@ -29,10 +29,10 @@ var DefaultPlanConfig = PlanConfig{
 
 // DefaultWorkerConfig provides default settings for workers.
 var DefaultWorkerConfig = WorkerConfig{
-	MaxLockPerSecond:          1,
-	MaxBufferJobsCount:        1,
-	MaxPerformPerSecond:       1,
-	MaxConcurrentPerformCount: 1,
+	MaxLockPerSecond:          5,
+	MaxBufferJobsCount:        0,
+	MaxPerformPerSecond:       1000,
+	MaxConcurrentPerformCount: 200,
 }
 
 // DefaultMaxEnqueuePerBatch defines the default maximum number of plans

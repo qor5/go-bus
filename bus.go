@@ -436,6 +436,7 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 		}
 
 		ctx := que.WithSkipConflict(ctx)
+		goq := b.dialect.GoQue()
 		for i := 0; i < len(allPlans); i += batchSize {
 			end := i + batchSize
 			if end > len(allPlans) {
@@ -443,7 +444,7 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 			}
 
 			batch := allPlans[i:end]
-			_, err = b.dialect.GoQue().Enqueue(ctx, tx, batch...)
+			_, err = goq.Enqueue(ctx, tx, batch...)
 			if err != nil {
 				return errors.Wrap(err, "failed to enqueue jobs batch")
 			}

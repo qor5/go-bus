@@ -2,7 +2,7 @@ module github.com/qor5/go-bus
 
 go 1.23.0
 
-replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250326093419-60a144e0a565
+replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250417171457-4715a14d4ddb
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.2
@@ -11,7 +11,7 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/theplant/testenv v0.1.0
 	github.com/tnclong/go-que v0.0.0-20240226030728-4e1f3c8ec781
-	golang.org/x/sync v0.10.0
+	golang.org/x/sync v0.11.0
 )
 
 require (
@@ -70,9 +70,9 @@ require (
 	go.opentelemetry.io/otel v1.24.0 // indirect
 	go.opentelemetry.io/otel/metric v1.24.0 // indirect
 	go.opentelemetry.io/otel/trace v1.24.0 // indirect
-	golang.org/x/crypto v0.31.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/crypto v0.35.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/postgres v1.5.7 // indirect

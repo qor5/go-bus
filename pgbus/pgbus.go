@@ -9,11 +9,10 @@ import (
 // New creates a new Bus instance backed by PostgreSQL.
 // It sets up the required database dialect and go-que implementation,
 // and automatically performs database migrations.
-func New(db *sql.DB) (bus.Bus, error) {
+func New(db *sql.DB, opts ...bus.BusOption) (bus.Bus, error) {
 	dialect, err := NewDialect(db)
 	if err != nil {
 		return nil, err
 	}
-
-	return bus.New(dialect)
+	return bus.New(dialect, opts...)
 }

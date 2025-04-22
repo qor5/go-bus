@@ -83,7 +83,7 @@ customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(
 err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
 
 // 带唯一ID的发布（用于消息去重）
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345-created-1"))
+err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
 
 // 带头部信息的发布
 err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
@@ -98,7 +98,7 @@ outbound := &bus.Outbound{
         Header:  bus.Header{"Content-Type": []string{"application/json"}},
         Payload: []byte(`{"id": "12345", "total": 99.99}`),
     },
-    UniqueID: "order-12345-created-event", // 可选的唯一ID，用于消息去重
+    UniqueID: bus.UniqueID("order-12345"), // 可选的唯一ID，用于消息去重
 }
 err = bus.Dispatch(ctx, outbound)
 
@@ -108,14 +108,14 @@ outbound1 := &bus.Outbound{
         Subject: "orders.created",
         Payload: []byte(`{"id": "12345", "total": 99.99}`),
     },
-    UniqueID: "order-12345-created",
+    UniqueID: bus.UniqueID("order-12345"),
 }
 outbound2 := &bus.Outbound{
     Message: bus.Message{
         Subject: "notifications.sent",
         Payload: []byte(`{"user_id": "user123", "message": "您的订单已创建"}`),
     },
-    UniqueID: "notification-user123-order-created",
+    UniqueID: bus.UniqueID("notification-user123-order-created"),
 }
 // Dispatch 方法支持在一次调用中发布多个 outbound 消息
 err = bus.Dispatch(ctx, outbound1, outbound2)

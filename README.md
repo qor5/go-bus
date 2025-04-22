@@ -85,7 +85,7 @@ customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(
 err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
 
 // Publishing with unique ID (for deduplication)
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345-created-1"))
+err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
 
 // Publishing with headers
 err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
@@ -100,7 +100,7 @@ outbound := &bus.Outbound{
         Header:  bus.Header{"Content-Type": []string{"application/json"}},
         Payload: []byte(`{"id": "12345", "total": 99.99}`),
     },
-    UniqueID: "order-12345-created-event", // Optional unique ID for message deduplication
+    UniqueID: bus.UniqueID("order-12345"), // Optional unique ID for message deduplication
 }
 err = bus.Dispatch(ctx, outbound)
 
@@ -110,14 +110,14 @@ outbound1 := &bus.Outbound{
         Subject: "orders.created",
         Payload: []byte(`{"id": "12345", "total": 99.99}`),
     },
-    UniqueID: "order-12345-created",
+    UniqueID: bus.UniqueID("order-12345"),
 }
 outbound2 := &bus.Outbound{
     Message: bus.Message{
         Subject: "notifications.sent",
         Payload: []byte(`{"user_id": "user123", "message": "Your order has been created"}`),
     },
-    UniqueID: "notification-user123-order-created",
+    UniqueID: bus.UniqueID("notification-user123-order-created"),
 }
 // Dispatch supports publishing multiple outbound messages in a single call
 err = bus.Dispatch(ctx, outbound1, outbound2)

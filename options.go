@@ -174,7 +174,7 @@ func WithMaxEnqueuePerBatch(max int) BusOption {
 
 type PublishOptions struct {
 	Header   Header
-	UniqueID string
+	UniqueID func(msg *Outbound) string
 }
 
 type PublishOption func(*PublishOptions)
@@ -185,8 +185,14 @@ func WithHeader(header Header) PublishOption {
 	}
 }
 
-func WithUniqueID(uniqueID string) PublishOption {
+func WithUniqueID(v string) PublishOption {
 	return func(opts *PublishOptions) {
-		opts.UniqueID = uniqueID
+		opts.UniqueID = UniqueID(v)
+	}
+}
+
+func WithPureUniqueID(v string) PublishOption {
+	return func(opts *PublishOptions) {
+		opts.UniqueID = PureUniqueID(v)
 	}
 }

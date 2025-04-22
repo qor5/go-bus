@@ -4,14 +4,12 @@ import (
 	"context"
 	"log/slog"
 	"maps"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/pkg/errors"
-	"github.com/rs/xid"
 	"github.com/tnclong/go-que"
 	"golang.org/x/sync/errgroup"
 )
@@ -334,10 +332,6 @@ func (b *BusImpl) Publish(ctx context.Context, subject string, payload []byte, o
 	})
 }
 
-var UniqueIDGenerator = func() string {
-	return "_gobus_:" + xid.New().String()
-}
-
 // Dispatch sends outbound messages to all queues with subscriptions matching the subject.
 // All messages are processed in a single transaction.
 func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) {
@@ -390,9 +384,13 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 
 			if planConfig.UniqueLifecycle != que.Ignore {
 				if uniqueID == nil {
-					id := strings.TrimSpace(m.UniqueID)
+					f := m.UniqueID
+					if f == nil {
+						f = FallbackUniqueID
+					}
+					id := f(m)
 					if id == "" {
-						id = UniqueIDGenerator()
+						return errors.New("unique id is required")
 					}
 					uniqueID = &id
 				}

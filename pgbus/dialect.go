@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ type Dialect struct {
 // NewDialect creates a new PostgreSQL-specific implementation of the bus.Dialect interface.
 // It requires a valid PostgreSQL database connection.
 func NewDialect(db *sql.DB) (*Dialect, error) {
-	goq, err := pg.New(db)
+	goq, err := pg.NewWithOptions(pg.Options{DB: db, DBMigrate: false})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create GoQue instance")
 	}
@@ -45,9 +46,17 @@ func (d *Dialect) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, er
 	return d.db.BeginTx(ctx, opts)
 }
 
+var MaxMigrationAttempts = 10
+
 // Migrate creates the subscriptions table and indexes.
-func (d *Dialect) Migrate(ctx context.Context) error {
-	_, err := d.db.ExecContext(ctx, `
+func Migrate(ctx context.Context, db *sql.DB) error {
+	f := func() error {
+		err := pg.Migrate(db)
+		if err != nil {
+			return errors.Wrap(err, "failed to migrate go-que table")
+		}
+
+		_, err = db.ExecContext(ctx, `
     CREATE TABLE IF NOT EXISTS gobus_subscriptions (
         id SERIAL PRIMARY KEY,
         queue VARCHAR(100) NOT NULL CHECK (char_length(TRIM(queue)) > 0 AND char_length(queue) <= 100),
@@ -63,10 +72,33 @@ func (d *Dialect) Migrate(ctx context.Context) error {
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_queue_idx 
         ON gobus_subscriptions (queue);
     `)
-	if err != nil {
-		return errors.Wrap(err, "failed to create subscriptions table and indexes")
+		if err != nil {
+			return errors.Wrap(err, "failed to create subscriptions table and indexes")
+		}
+		return nil
+	}
+	for attempts := 0; attempts < MaxMigrationAttempts; attempts++ {
+		err := f()
+		if err == nil {
+			return nil
+		}
+		if strings.Contains(err.Error(), `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`) ||
+			strings.Contains(err.Error(), "already exists (SQLSTATE 42P07)") {
+			select {
+			case <-ctx.Done():
+				return errors.Wrap(ctx.Err(), "failed to migrate")
+			case <-time.After(time.Duration(100+rand.Intn(100)) * time.Millisecond):
+			}
+			continue
+		}
+		return err
 	}
 	return nil
+}
+
+// Migrate creates the subscriptions table and indexes.
+func (d *Dialect) Migrate(ctx context.Context) error {
+	return Migrate(ctx, d.db)
 }
 
 // scanSubscriptionsInternal scans rows and converts them to subscription objects

@@ -54,7 +54,7 @@ type Outbound struct {
 
 	// UniqueID is the unique identifier for this message.
 	// If set, it will be used for message deduplication.
-	UniqueID string `json:"uniqueId,omitempty"`
+	UniqueID func(msg *Outbound) string `json:"-"`
 }
 
 type Inbound struct {

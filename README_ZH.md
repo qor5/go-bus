@@ -20,7 +20,7 @@ go get github.com/qor5/go-bus
 为了确保正常运行，需要在您的 `go.mod` 文件中添加以下替换指令：
 
 ```go
-replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250417171457-4715a14d4ddb
+replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9
 ```
 
 ## 快速开始

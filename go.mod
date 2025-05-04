@@ -2,7 +2,7 @@ module github.com/qor5/go-bus
 
 go 1.23.0
 
-replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250417171457-4715a14d4ddb
+replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.2

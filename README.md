@@ -22,7 +22,7 @@ go get github.com/qor5/go-bus
 For proper functionality, you need to add the following replace directive to your `go.mod` file:
 
 ```go
-replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250417171457-4715a14d4ddb
+replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9
 ```
 
 ## Quick Start

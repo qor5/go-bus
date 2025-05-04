@@ -98,8 +98,8 @@ github.com/moby/sys/userns v0.1.0 h1:tVLXkFOxVu9A64/yh59slHVv9ahO9UIev4JZusOLG/g
 github.com/moby/sys/userns v0.1.0/go.mod h1:IHUYgu/kao6N8YZlp9Cf444ySSvCmDlmzUcYfDHOl28=
 github.com/moby/term v0.5.0 h1:xt8Q1nalod/v7BqbG21f8mQPqH+xAaC9C3N3wfWbVP0=
 github.com/moby/term v0.5.0/go.mod h1:8FzsFHVUBGZdbDsJw/ot+X+d5HLUbvklYLJ9uGfcI3Y=
-github.com/molon/go-que v0.0.0-20250417171457-4715a14d4ddb h1:a8Xsnrmbw8SO2iAYBcNy7bfHV6fSV6kArpUvKfdG6UM=
-github.com/molon/go-que v0.0.0-20250417171457-4715a14d4ddb/go.mod h1:j+L/Ih47BU2nmiEW1m5zS2gjxB6xqGyxzHfdXLg/3Ho=
+github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9 h1:LCv6KR8sLfealzeCguybkp4HUw5+ltcBXuYwKPF3KBE=
+github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9/go.mod h1:j+L/Ih47BU2nmiEW1m5zS2gjxB6xqGyxzHfdXLg/3Ho=
 github.com/morikuni/aec v1.0.0 h1:nP9CBfwrvYnBRgY6qfDQkygYDmYwOilePFkwzv4dU8A=
 github.com/morikuni/aec v1.0.0/go.mod h1:BbKIizmSmc5MMPqRYbxO4ZU0S0+P200+tUnFx7PXmsc=
 github.com/nxadm/tail v1.4.8 h1:nPr65rt6Y5JFSKQO7qToXr7pePgD6Gwiw05lkbyAQTE=

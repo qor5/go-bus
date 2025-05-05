@@ -10,7 +10,6 @@ package bus
 
 import (
 	"context"
-	"io"
 	"net/http"
 
 	"github.com/tnclong/go-que"
@@ -71,10 +70,14 @@ type Inbound struct {
 // Handler represents a function that processes messages.
 type Handler func(ctx context.Context, msg *Inbound) error
 
+// Consumer represents a message consumer that can be stopped.
+type Consumer interface {
+	// Stop stops the consumer and releases any associated resources.
+	Stop() error
+}
+
 // Queue represents a message queue that can subscribe to subjects.
 type Queue interface {
-	io.Closer
-
 	// Subscribe registers the queue to receive messages published to subjects matching the pattern.
 	// Pattern supports NATS-style wildcards: '*' for a single token, '>' for multiple trailing tokens.
 	Subscribe(ctx context.Context, pattern string, opts ...SubscribeOption) (Subscription, error)
@@ -82,15 +85,15 @@ type Queue interface {
 	// Subscriptions returns all subscriptions for the queue.
 	Subscriptions(ctx context.Context) ([]Subscription, error)
 
-	// Consume registers the queue to receive messages published to subjects matching the pattern.
-	Consume(ctx context.Context, handler Handler, opts ...ConsumeOption) error
+	// StartConsumer starts a new message consumer for this queue.
+	// The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
+	// The returned Consumer must be stopped by the caller when no longer needed.
+	StartConsumer(ctx context.Context, handler Handler, opts ...ConsumeOption) (Consumer, error)
 }
 
 // Bus provides publish-subscribe capabilities on top of go-que.
 // It manages subject-queue mappings and handles subject pattern matching.
 type Bus interface {
-	io.Closer
-
 	// Queue returns a queue with the specified name.
 	Queue(name string) Queue
 

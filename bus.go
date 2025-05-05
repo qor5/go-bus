@@ -54,8 +54,11 @@ func (c *consumer) Stop() error {
 // StartConsumer starts a new message consumer for this queue.
 // The returned Consumer must be stopped by the caller when no longer needed.
 // The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
-// In the current implementation, ctx is unused.
-func (q *QueueImpl) StartConsumer(_ context.Context, handler Handler, opts ...ConsumeOption) (Consumer, error) {
+func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...ConsumeOption) (Consumer, error) {
+	if ctx.Err() != nil {
+		return nil, errors.Wrap(ctx.Err(), "context is done")
+	}
+
 	consumeOpts := &ConsumeOptions{
 		WorkerConfig: DefaultWorkerConfig,
 	}

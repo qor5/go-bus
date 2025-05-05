@@ -49,14 +49,53 @@ if err != nil {
 }
 ```
 
-### Creating Subscriptions
+### Consuming Messages
 
 ```go
-ctx := context.Background()
-
 // Get a queue
 queue := bus.Queue("my_service_queue")
 
+// Basic consumption
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+    fmt.Printf("Received message: subject=%s, payload=%s\n", msg.Subject, string(msg.Payload))
+
+    // Reading headers
+    if contentType := msg.Header.Get("Content-Type"); contentType != "" {
+        fmt.Printf("Content-Type: %s\n", contentType)
+    }
+
+    // Mark message as done after processing
+    return msg.Done(ctx)
+})
+if err != nil {
+    log.Fatalf("Failed to start consumer: %v", err)
+}
+// Ensure consumer is stopped when done
+defer consumer.Stop()
+
+// Consumption with custom worker configuration
+workerConfig := bus.WorkerConfig{
+    MaxLockPerSecond:          5,
+    MaxBufferJobsCount:        10,
+    MaxPerformPerSecond:       5,
+    MaxConcurrentPerformCount: 2,
+}
+
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+    // Process message...
+
+    // If you want to discard the message, use Destroy instead of Done
+    return msg.Destroy(ctx)
+}, bus.WithWorkerConfig(workerConfig))
+if err != nil {
+    log.Fatalf("Failed to start consumer with options: %v", err)
+}
+defer consumer.Stop()
+```
+
+### Creating Subscriptions
+
+```go
 // Create subscriptions - supporting various patterns
 exactSub, err := queue.Subscribe(ctx, "orders.created")                // Exact match
 wildcardSub, err := queue.Subscribe(ctx, "products.*.category.*.info") // Single-level wildcard at multiple positions
@@ -75,6 +114,9 @@ customPlan := bus.PlanConfig{
 }
 
 customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(customPlan))
+
+// Unsubscribe from a specific subscription
+err = customSub.Unsubscribe(ctx)
 ```
 
 ### Publishing Messages
@@ -122,47 +164,6 @@ outbound2 := &bus.Outbound{
 err = bus.Dispatch(ctx, outbound1, outbound2)
 ```
 
-### Consuming Messages
-
-```go
-// Basic consumption
-consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
-    fmt.Printf("Received message: subject=%s, payload=%s\n", msg.Subject, string(msg.Payload))
-
-    // Reading headers
-    if contentType := msg.Header.Get("Content-Type"); contentType != "" {
-        fmt.Printf("Content-Type: %s\n", contentType)
-    }
-
-    // Mark message as done after processing
-    return msg.Done(ctx)
-})
-if err != nil {
-    log.Fatalf("Failed to start consumer: %v", err)
-}
-// Ensure consumer is stopped when done
-defer consumer.Stop()
-
-// Consumption with custom worker configuration
-workerConfig := bus.WorkerConfig{
-    MaxLockPerSecond:          5,
-    MaxBufferJobsCount:        10,
-    MaxPerformPerSecond:       5,
-    MaxConcurrentPerformCount: 2,
-}
-
-consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
-    // Process message...
-
-    // If you want to discard the message, use Destroy instead of Done
-    return msg.Destroy(ctx)
-}, bus.WithWorkerConfig(workerConfig))
-if err != nil {
-    log.Fatalf("Failed to start consumer with options: %v", err)
-}
-defer consumer.Stop()
-```
-
 ### Finding Matching Subscriptions
 
 ```go
@@ -177,13 +178,6 @@ queueSubs, err := queue.Subscriptions(ctx)
 for _, sub := range queueSubs {
     fmt.Printf("Pattern: %s, Created at: %s\n", sub.Pattern(), sub.CreatedAt())
 }
-```
-
-### Unsubscribing
-
-```go
-// Unsubscribe from a specific subscription
-err = subscription.Unsubscribe(ctx)
 ```
 
 ## Advanced Usage

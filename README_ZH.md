@@ -47,14 +47,53 @@ if err != nil {
 }
 ```
 
-### 创建订阅
+### 消费消息
 
 ```go
-ctx := context.Background()
-
 // 获取队列
 queue := bus.Queue("my_service_queue")
 
+// 基本消费
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+    fmt.Printf("收到消息: 主题=%s, 载荷=%s\n", msg.Subject, string(msg.Payload))
+
+    // 读取头部信息
+    if contentType := msg.Header.Get("Content-Type"); contentType != "" {
+        fmt.Printf("Content-Type: %s\n", contentType)
+    }
+
+    // 处理完成后标记消息为已完成
+    return msg.Done(ctx)
+})
+if err != nil {
+    log.Fatalf("启动消费者失败: %v", err)
+}
+// 确保在完成后停止消费者
+defer consumer.Stop()
+
+// 带自定义配置的消费
+workerConfig := bus.WorkerConfig{
+    MaxLockPerSecond:          5,
+    MaxBufferJobsCount:        10,
+    MaxPerformPerSecond:       5,
+    MaxConcurrentPerformCount: 2,
+}
+
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+    // 处理消息...
+
+    // 如果需要丢弃消息，可以使用 Destroy 而不是 Done
+    return msg.Destroy(ctx)
+}, bus.WithWorkerConfig(workerConfig))
+if err != nil {
+    log.Fatalf("启动自定义消费者失败: %v", err)
+}
+defer consumer.Stop()
+```
+
+### 创建订阅
+
+```go
 // 创建订阅 - 支持多种模式
 exactSub, err := queue.Subscribe(ctx, "orders.created")                // 精确匹配
 wildcardSub, err := queue.Subscribe(ctx, "products.*.category.*.info") // 单级通配符支持多处匹配
@@ -73,6 +112,9 @@ customPlan := bus.PlanConfig{
 }
 
 customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(customPlan))
+
+// 取消特定订阅
+err = customSub.Unsubscribe(ctx)
 ```
 
 ### 发布消息
@@ -120,47 +162,6 @@ outbound2 := &bus.Outbound{
 err = bus.Dispatch(ctx, outbound1, outbound2)
 ```
 
-### 消费消息
-
-```go
-// 基本消费
-consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
-    fmt.Printf("收到消息: 主题=%s, 载荷=%s\n", msg.Subject, string(msg.Payload))
-
-    // 读取头部信息
-    if contentType := msg.Header.Get("Content-Type"); contentType != "" {
-        fmt.Printf("Content-Type: %s\n", contentType)
-    }
-
-    // 处理完成后标记消息为已完成
-    return msg.Done(ctx)
-})
-if err != nil {
-    log.Fatalf("启动消费者失败: %v", err)
-}
-// 确保在完成后停止消费者
-defer consumer.Stop()
-
-// 带自定义配置的消费
-workerConfig := bus.WorkerConfig{
-    MaxLockPerSecond:          5,
-    MaxBufferJobsCount:        10,
-    MaxPerformPerSecond:       5,
-    MaxConcurrentPerformCount: 2,
-}
-
-consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
-    // 处理消息...
-
-    // 如果需要丢弃消息，可以使用 Destroy 而不是 Done
-    return msg.Destroy(ctx)
-}, bus.WithWorkerConfig(workerConfig))
-if err != nil {
-    log.Fatalf("启动自定义消费者失败: %v", err)
-}
-defer consumer.Stop()
-```
-
 ### 查找匹配订阅
 
 ```go
@@ -175,13 +176,6 @@ queueSubs, err := queue.Subscriptions(ctx)
 for _, sub := range queueSubs {
     fmt.Printf("模式: %s, 创建时间: %s\n", sub.Pattern(), sub.CreatedAt())
 }
-```
-
-### 取消订阅
-
-```go
-// 取消特定订阅
-err = subscription.Unsubscribe(ctx)
 ```
 
 ## 高级用法

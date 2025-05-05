@@ -10,7 +10,7 @@ require (
 	github.com/rs/xid v1.6.0
 	github.com/stretchr/testify v1.10.0
 	github.com/theplant/testenv v0.1.0
-	github.com/tnclong/go-que v0.0.0-20240226030728-4e1f3c8ec781
+	github.com/tnclong/go-que v0.0.0-20250427075257-87f2def6b0a1
 )
 
 require (

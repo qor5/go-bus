@@ -21,4 +21,7 @@ var (
 
 	// ErrOverlappingPatterns is returned when a queue has multiple patterns matching the same subject.
 	ErrOverlappingPatterns = errors.New("queue has overlapping patterns which may cause unexpected behavior; only the first subscription will be triggered")
+
+	// ErrConsumerStopped is returned when the consumer is already normally stopped.
+	ErrConsumerStopped = errors.New("consumer already normally stopped")
 )

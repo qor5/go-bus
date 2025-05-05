@@ -42,13 +42,25 @@ func (q *QueueImpl) Subscriptions(ctx context.Context) ([]Subscription, error) {
 	return q.b.dialect.ByQueue(ctx, q.name)
 }
 
-// consumer implements the Consumer interface with a Stop function.
 type consumer struct {
-	stop func() error
+	ctx  context.Context
+	stop func(err error)
 }
 
-func (c *consumer) Stop() error {
-	return c.stop()
+func (c *consumer) Stop() {
+	c.stop(nil)
+}
+
+func (c *consumer) Done() <-chan struct{} {
+	return c.ctx.Done()
+}
+
+func (c *consumer) Err() error {
+	err := context.Cause(c.ctx)
+	if errors.Is(err, context.Canceled) { // if no cause
+		return ErrConsumerStopped // ensure not nil
+	}
+	return err
 }
 
 // StartConsumer starts a new message consumer for this queue.
@@ -99,13 +111,18 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...
 	}
 
 	// lifetime of the consumer
-	consumerCtx, consumerCancel := context.WithCancel(context.Background())
+	consumerCtx, consumerCancel := context.WithCancelCause(context.Background())
 	consumerDoneC := make(chan struct{})
+	consumerStop := func(err error) {
+		consumerCancel(err)
+		<-consumerDoneC
+	}
 	var workerMu sync.RWMutex
 
 	// Start a goroutine to run the worker
-	go func() {
+	go func() (xerr error) {
 		defer close(consumerDoneC)
+		defer func() { consumerCancel(xerr) }()
 
 		workerMu.RLock()
 		currentWorker := worker
@@ -114,38 +131,33 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...
 		for {
 			select {
 			case <-consumerCtx.Done():
-				return
+				return nil
 			default:
 			}
 
 			err := currentWorker.Run()
 			if err == que.ErrWorkerStoped {
-				return
+				return nil
 			}
 
-			q.b.logger.Warn("worker error, will attempt to recreate",
-				"queue", q.name,
-				"error", err)
+			q.b.logger.Warn("worker error, will attempt to recreate", "queue", q.name, "error", err)
 
 			nextBackoff := bkoff.NextBackOff()
 			if nextBackoff == backoff.Stop {
-				q.b.logger.Warn("backoff policy indicates no more retries, exiting worker",
-					"queue", q.name)
-				return
+				q.b.logger.Warn("backoff policy indicates no more retries, stopping consumer", "queue", q.name)
+				return errors.New("backoff policy indicates no more retries")
 			}
 
 			select {
 			case <-consumerCtx.Done():
-				return
+				return nil
 			case <-time.After(nextBackoff):
 			}
 
 			newWorker, err := startWorker()
 			if err != nil {
-				q.b.logger.Error("failed to recreate worker, exiting worker goroutine",
-					"queue", q.name,
-					"error", err)
-				return // Exit without retry if startWorker fails
+				q.b.logger.Error("failed to recreate worker, stopping consumer", "queue", q.name, "error", err)
+				return errors.Wrap(err, "failed to recreate worker, stopping consumer")
 			}
 
 			workerMu.Lock()
@@ -175,13 +187,9 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...
 		}
 	}()
 
-	// Return a simple consumer with just a stop function
 	return &consumer{
-		stop: func() error {
-			consumerCancel()
-			<-consumerDoneC
-			return nil
-		},
+		ctx:  consumerCtx,
+		stop: consumerStop,
 	}, nil
 }
 

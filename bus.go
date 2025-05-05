@@ -393,8 +393,7 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 			}
 
 			batch := allPlans[i:end]
-			_, err = goq.Enqueue(ctx, tx, batch...)
-			if err != nil {
+			if _, err := goq.Enqueue(ctx, tx, batch...); err != nil {
 				return errors.Wrap(err, "failed to enqueue jobs batch")
 			}
 		}

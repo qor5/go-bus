@@ -3,36 +3,24 @@ package bus
 import (
 	"context"
 	"log/slog"
-	"maps"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/pkg/errors"
 	"github.com/tnclong/go-que"
-	"golang.org/x/sync/errgroup"
 )
 
 var _ Queue = (*QueueImpl)(nil)
 
 // QueueImpl implements the Queue interface.
 type QueueImpl struct {
-	name   string
-	b      *BusImpl
-	mu     sync.RWMutex       // Protects worker state
-	worker *que.Worker        // Current active worker
-	cancel context.CancelFunc // Cancel function for worker context
-	doneC  chan struct{}      // Channel that closes when worker is fully stopped
-	closed int32              // Whether the queue is closed (0=open, 1=closed), using atomic operations
+	name string
+	b    *BusImpl
 }
 
 // Subscribe registers the queue to receive messages published to subjects matching the pattern.
 func (q *QueueImpl) Subscribe(ctx context.Context, pattern string, opts ...SubscribeOption) (Subscription, error) {
-	if atomic.LoadInt32(&q.closed) == 1 {
-		return nil, ErrQueueClosed
-	}
-
 	subscribeOpts := &SubscribeOptions{
 		PlanConfig: DefaultPlanConfig,
 	}
@@ -51,33 +39,23 @@ func (q *QueueImpl) Subscribe(ctx context.Context, pattern string, opts ...Subsc
 
 // Subscriptions returns all subscriptions for the queue.
 func (q *QueueImpl) Subscriptions(ctx context.Context) ([]Subscription, error) {
-	if atomic.LoadInt32(&q.closed) == 1 {
-		return nil, ErrQueueClosed
-	}
-
 	return q.b.dialect.ByQueue(ctx, q.name)
 }
 
-// Consume registers a worker to process messages for this queue.
-func (q *QueueImpl) Consume(_ context.Context, handler Handler, opts ...ConsumeOption) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+// consumer implements the Consumer interface with a Stop function.
+type consumer struct {
+	stop func() error
+}
 
-	// Check if queue is closed
-	if atomic.LoadInt32(&q.closed) == 1 {
-		return ErrQueueClosed
-	}
+func (c *consumer) Stop() error {
+	return c.stop()
+}
 
-	if q.worker != nil {
-		// Check if worker is already running
-		select {
-		case <-q.doneC:
-			// Worker is fully closed, can proceed to create new worker
-		default:
-			return ErrWorkerAlreadyRunning
-		}
-	}
-
+// StartConsumer starts a new message consumer for this queue.
+// The returned Consumer must be stopped by the caller when no longer needed.
+// The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
+// In the current implementation, ctx is unused.
+func (q *QueueImpl) StartConsumer(_ context.Context, handler Handler, opts ...ConsumeOption) (Consumer, error) {
 	consumeOpts := &ConsumeOptions{
 		WorkerConfig: DefaultWorkerConfig,
 	}
@@ -85,12 +63,6 @@ func (q *QueueImpl) Consume(_ context.Context, handler Handler, opts ...ConsumeO
 	for _, opt := range opts {
 		opt(consumeOpts)
 	}
-
-	consumingCtx, consumingCancel := context.WithCancel(context.Background())
-	doneC := make(chan struct{})
-
-	q.cancel = consumingCancel
-	q.doneC = doneC
 
 	var bkoff backoff.BackOff
 	if consumeOpts.Backoff != nil {
@@ -120,33 +92,35 @@ func (q *QueueImpl) Consume(_ context.Context, handler Handler, opts ...ConsumeO
 
 	worker, err := startWorker()
 	if err != nil {
-		consumingCancel()
-		close(doneC)
-		return errors.Wrap(err, "failed to create worker")
+		return nil, errors.Wrap(err, "failed to create worker")
 	}
 
-	q.worker = worker
+	// lifetime of the consumer
+	consumerCtx, consumerCancel := context.WithCancel(context.Background())
+	consumerDoneC := make(chan struct{})
+	var workerMu sync.RWMutex
 
+	// Start a goroutine to run the worker
 	go func() {
-		defer close(doneC)
+		defer close(consumerDoneC)
 
-		q.mu.RLock()
-		currentWorker := q.worker
-		q.mu.RUnlock()
+		workerMu.RLock()
+		currentWorker := worker
+		workerMu.RUnlock()
 
 		for {
 			select {
-			case <-consumingCtx.Done():
+			case <-consumerCtx.Done():
 				return
 			default:
 			}
 
 			err := currentWorker.Run()
-			if err == que.ErrWorkerStoped || atomic.LoadInt32(&q.closed) == 1 {
+			if err == que.ErrWorkerStoped {
 				return
 			}
 
-			q.b.logger.Warn("worker error, will attempt to reconnect",
+			q.b.logger.Warn("worker error, will attempt to recreate",
 				"queue", q.name,
 				"error", err)
 
@@ -158,13 +132,9 @@ func (q *QueueImpl) Consume(_ context.Context, handler Handler, opts ...ConsumeO
 			}
 
 			select {
-			case <-consumingCtx.Done():
+			case <-consumerCtx.Done():
 				return
 			case <-time.After(nextBackoff):
-			}
-
-			if atomic.LoadInt32(&q.closed) == 1 {
-				return
 			}
 
 			newWorker, err := startWorker()
@@ -175,61 +145,41 @@ func (q *QueueImpl) Consume(_ context.Context, handler Handler, opts ...ConsumeO
 				return // Exit without retry if startWorker fails
 			}
 
-			q.mu.Lock()
-			q.worker = newWorker
+			workerMu.Lock()
+			worker = newWorker
 			currentWorker = newWorker
-			q.mu.Unlock()
+			workerMu.Unlock()
 
-			q.b.logger.Info("worker successfully reconnected", "queue", q.name)
+			q.b.logger.Info("worker successfully recreated", "queue", q.name)
 
 			bkoff.Reset()
 		}
 	}()
 
+	// Start a goroutine to handle graceful shutdown
 	go func() {
-		<-consumingCtx.Done()
+		<-consumerCtx.Done()
 
-		q.mu.RLock()
-		workerToStop := q.worker
-		q.mu.RUnlock()
+		workerMu.RLock()
+		workerToStop := worker
+		workerMu.RUnlock()
 
-		if workerToStop == nil {
-			return
-		}
-
-		err := workerToStop.Stop(context.Background())
-		if err != nil {
-			q.b.logger.Warn("error stopping worker", "queue", q.name, "error", err)
+		if workerToStop != nil {
+			err := workerToStop.Stop(context.Background())
+			if err != nil {
+				q.b.logger.Warn("error stopping worker", "queue", q.name, "error", err)
+			}
 		}
 	}()
 
-	return nil
-}
-
-// Close closes the queue and stops any running workers.
-func (q *QueueImpl) Close() error {
-	if !atomic.CompareAndSwapInt32(&q.closed, 0, 1) {
-		return nil
-	}
-
-	q.mu.RLock()
-	var cancel context.CancelFunc
-	var doneC chan struct{}
-
-	if q.cancel != nil {
-		cancel = q.cancel
-		doneC = q.doneC
-	}
-	q.mu.RUnlock()
-
-	if cancel != nil {
-		cancel()
-		if doneC != nil {
-			<-doneC
-		}
-	}
-
-	return nil
+	// Return a simple consumer with just a stop function
+	return &consumer{
+		stop: func() error {
+			consumerCancel()
+			<-consumerDoneC
+			return nil
+		},
+	}, nil
 }
 
 var _ Bus = (*BusImpl)(nil)
@@ -239,7 +189,6 @@ type BusImpl struct {
 	dialect            Dialect
 	mu                 sync.RWMutex
 	queues             map[string]Queue
-	closed             int32 // Whether the bus is closed (0=open, 1=closed), using atomic operations
 	logger             *slog.Logger
 	maxEnqueuePerBatch int // Maximum number of plans that can be enqueued in a single transaction
 }
@@ -268,7 +217,6 @@ func New(dialect Dialect, opts ...BusOption) (Bus, error) {
 	b := &BusImpl{
 		dialect:            dialect,
 		queues:             make(map[string]Queue),
-		closed:             0, // Initialize as open
 		logger:             busOpts.Logger,
 		maxEnqueuePerBatch: busOpts.MaxEnqueuePerBatch,
 	}
@@ -302,10 +250,6 @@ func (b *BusImpl) Queue(name string) Queue {
 		return q
 	}
 
-	if atomic.LoadInt32(&b.closed) == 1 {
-		return nil
-	}
-
 	queue := &QueueImpl{
 		name: name,
 		b:    b,
@@ -335,10 +279,6 @@ func (b *BusImpl) Publish(ctx context.Context, subject string, payload []byte, o
 // Dispatch sends outbound messages to all queues with subscriptions matching the subject.
 // All messages are processed in a single transaction.
 func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) {
-	if atomic.LoadInt32(&b.closed) == 1 {
-		return ErrBusClosed
-	}
-
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -463,31 +403,5 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 
 // BySubject returns all subscriptions with patterns matching the given subject.
 func (b *BusImpl) BySubject(ctx context.Context, subject string) ([]Subscription, error) {
-	if atomic.LoadInt32(&b.closed) == 1 {
-		return nil, ErrBusClosed
-	}
-
 	return b.dialect.BySubject(ctx, subject)
-}
-
-// Close closes the bus and releases any associated resources.
-func (b *BusImpl) Close() error {
-	if !atomic.CompareAndSwapInt32(&b.closed, 0, 1) {
-		return nil
-	}
-
-	b.mu.RLock()
-	queues := maps.Clone(b.queues)
-	b.mu.RUnlock()
-
-	g := new(errgroup.Group)
-
-	for _, q := range queues {
-		q := q
-		g.Go(func() error {
-			return q.Close()
-		})
-	}
-
-	return g.Wait()
 }

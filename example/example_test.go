@@ -40,7 +40,7 @@ type UserUpdate struct {
 func TestCIAMBusinessMarketingIntegration(t *testing.T) {
 	env, err := testenv.New().DBEnable(true).SetUp()
 	require.NoError(t, err, "Failed to create test environment")
-	defer env.TearDown()
+	defer func() { _ = env.TearDown() }()
 
 	db, err := env.DB.DB()
 	require.NoError(t, err, "Failed to get database connection")
@@ -127,7 +127,6 @@ func startCIAM(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitGroup
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create CIAM bus instance")
-	defer b.Close()
 
 	// Wait for both services to be ready, this is for testing purpose
 	t.Log("CIAM waiting for other services to be ready")
@@ -183,10 +182,10 @@ func startBusiness(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitG
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Business bus instance")
-	defer b.Close()
 
 	businessQueue := b.Queue("business_service")
-	err = businessQueue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+
+	consumer, err := businessQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
 		var user User
 		if err := json.Unmarshal(msg.Payload, &user); err != nil {
 			return err
@@ -200,6 +199,7 @@ func startBusiness(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitG
 		return msg.Done(ctx)
 	})
 	require.NoError(t, err, "Failed to start business service consumer")
+	defer func() { _ = consumer.Stop() }()
 	t.Logf("Business service consumer started")
 
 	_, err = businessQueue.Subscribe(ctx, SubjectIdentityCreated, bus.WithPlanConfig(bus.PlanConfig{
@@ -224,10 +224,10 @@ func startMarketing(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.Wait
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Marketing bus instance")
-	defer b.Close()
 
 	marketingQueue := b.Queue("marketing_service")
-	err = marketingQueue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+
+	consumer, err := marketingQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
 		var update UserUpdate
 		if err := json.Unmarshal(msg.Payload, &update); err != nil {
 			return err
@@ -249,6 +249,7 @@ func startMarketing(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.Wait
 		return msg.Destroy(ctx)
 	})
 	require.NoError(t, err, "Failed to start marketing service consumer")
+	defer func() { _ = consumer.Stop() }()
 	t.Logf("Marketing service consumer started")
 
 	_, err = marketingQueue.Subscribe(ctx, SubjectIdentityUpdated)

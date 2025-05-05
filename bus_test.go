@@ -753,12 +753,20 @@ func TestMultipleConsumers(t *testing.T) {
 	_, err = queue2.Subscribe(ctx, testTopic)
 	require.NoError(t, err, "Failed to subscribe queue2 to test topic")
 
+	// Custom worker config to speed up tests
+	workerConf := bus.WorkerConfig{
+		MaxLockPerSecond:          1000,
+		MaxBufferJobsCount:        1000,
+		MaxPerformPerSecond:       1000,
+		MaxConcurrentPerformCount: 1000,
+	}
+
 	// Start two consumers on the first queue
 	consumer1, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
 		t.Logf("queue consumer1 received message")
 		queueMsgCh <- msg
 		return msg.Done(ctx)
-	})
+	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start first consumer on queue")
 	defer func() { _ = consumer1.Stop() }()
 
@@ -766,7 +774,7 @@ func TestMultipleConsumers(t *testing.T) {
 		t.Logf("queue consumer2 received message")
 		queueMsgCh <- msg
 		return msg.Done(ctx)
-	})
+	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start second consumer on queue")
 	defer func() { _ = consumer2.Stop() }()
 
@@ -775,7 +783,7 @@ func TestMultipleConsumers(t *testing.T) {
 		t.Logf("queue2 consumer received message")
 		queue2MsgCh <- msg
 		return msg.Done(ctx)
-	})
+	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer on queue2")
 	defer func() { _ = consumer3.Stop() }()
 

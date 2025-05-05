@@ -116,6 +116,8 @@ customPlan := bus.PlanConfig{
 customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(customPlan))
 
 // Unsubscribe from a specific subscription
+// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
+// This is because go-bus is designed to support offline messages.
 err = customSub.Unsubscribe(ctx)
 ```
 
@@ -214,6 +216,7 @@ if err != nil {
     log.Fatalf("Failed to create broadcast subscription: %v", err)
 }
 defer func() {
+    // Since podQueue is one-time, you should unsubscribe immediately when the program exits
     if err := sub.Unsubscribe(context.Background()); err != nil {
         log.Printf("Failed to unsubscribe: %v", err)
     }

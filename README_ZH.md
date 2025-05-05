@@ -114,6 +114,7 @@ customPlan := bus.PlanConfig{
 customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(customPlan))
 
 // 取消特定订阅
+// 这个方法通常是确认不需要订阅的时候才执行，并非应该伴随程序退出执行。因为 go-bus 设计上是支持离线消息的。
 err = customSub.Unsubscribe(ctx)
 ```
 
@@ -212,6 +213,7 @@ if err != nil {
     log.Fatalf("创建广播订阅失败: %v", err)
 }
 defer func() {
+    // 因为 podQueue 是一次性的，所以应该在程序退出时即刻取消订阅
     if err := sub.Unsubscribe(context.Background()); err != nil {
         log.Printf("取消订阅失败: %v", err)
     }

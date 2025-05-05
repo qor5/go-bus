@@ -47,7 +47,6 @@ bus, err := pgbus.New(db)
 if err != nil {
     log.Fatalf("Failed to create bus: %v", err)
 }
-defer bus.Close()
 ```
 
 ### Creating Subscriptions
@@ -127,7 +126,7 @@ err = bus.Dispatch(ctx, outbound1, outbound2)
 
 ```go
 // Basic consumption
-err = queue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     fmt.Printf("Received message: subject=%s, payload=%s\n", msg.Subject, string(msg.Payload))
 
     // Reading headers
@@ -138,6 +137,11 @@ err = queue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     // Mark message as done after processing
     return msg.Done(ctx)
 })
+if err != nil {
+    log.Fatalf("Failed to start consumer: %v", err)
+}
+// Ensure consumer is stopped when done
+defer consumer.Stop()
 
 // Consumption with custom worker configuration
 workerConfig := bus.WorkerConfig{
@@ -147,12 +151,16 @@ workerConfig := bus.WorkerConfig{
     MaxConcurrentPerformCount: 2,
 }
 
-err = queue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     // Process message...
 
     // If you want to discard the message, use Destroy instead of Done
     return msg.Destroy(ctx)
 }, bus.WithWorkerConfig(workerConfig))
+if err != nil {
+    log.Fatalf("Failed to start consumer with options: %v", err)
+}
+defer consumer.Stop()
 ```
 
 ### Finding Matching Subscriptions
@@ -192,36 +200,32 @@ import (
 )
 
 // Create a unique queue name for each service instance (like a K8s Pod)
-instanceQueueName := fmt.Sprintf("broadcast-receiver-%s", uuid.New().String())
-instanceQueue := bus.Queue(instanceQueueName)
-
-// Subscribe to broadcast topics
-sub, err := instanceQueue.Subscribe(ctx, "broadcast.events.>")
-if err != nil {
-    log.Fatalf("Failed to create broadcast subscription: %v", err)
-}
+podQueueName := fmt.Sprintf("broadcast-receiver-%s", uuid.New().String())
+podQueue := bus.Queue(podQueueName)
 
 // Start consuming messages (starts workers but doesn't block)
-err = instanceQueue.Consume(context.Background(), func(ctx context.Context, msg *bus.Inbound) error {
+consumer, err := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     log.Printf("Instance %s received broadcast message: %s - %s",
-        instanceQueueName, msg.Subject, string(msg.Payload))
+        podQueueName, msg.Subject, string(msg.Payload))
     return msg.Done(ctx)
 })
 if err != nil {
     log.Printf("Failed to start consumer: %v", err)
 }
+defer consumer.Stop()
 
-// Clean up resources on service shutdown
-shutdown := func() {
-    ctx := context.Background()
-    if err := sub.Unsubscribe(ctx); err != nil {
+// Subscribe to broadcast topics
+sub, err := podQueue.Subscribe(ctx, "broadcast.events.>")
+if err != nil {
+    log.Fatalf("Failed to create broadcast subscription: %v", err)
+}
+defer func() {
+    if err := sub.Unsubscribe(context.Background()); err != nil {
         log.Printf("Failed to unsubscribe: %v", err)
     }
-    // Other cleanup work...
-}
+}()
 
-// Register shutdown hooks
-// e.g., signal.Notify(...) or k8s graceful shutdown handling
+// Other service blocking logic
 ```
 
 This pattern is particularly useful for:

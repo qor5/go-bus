@@ -45,7 +45,6 @@ bus, err := pgbus.New(db)
 if err != nil {
     log.Fatalf("创建总线失败: %v", err)
 }
-defer bus.Close()
 ```
 
 ### 创建订阅
@@ -125,7 +124,7 @@ err = bus.Dispatch(ctx, outbound1, outbound2)
 
 ```go
 // 基本消费
-err = queue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     fmt.Printf("收到消息: 主题=%s, 载荷=%s\n", msg.Subject, string(msg.Payload))
 
     // 读取头部信息
@@ -136,6 +135,11 @@ err = queue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     // 处理完成后标记消息为已完成
     return msg.Done(ctx)
 })
+if err != nil {
+    log.Fatalf("启动消费者失败: %v", err)
+}
+// 确保在完成后停止消费者
+defer consumer.Stop()
 
 // 带自定义配置的消费
 workerConfig := bus.WorkerConfig{
@@ -145,12 +149,16 @@ workerConfig := bus.WorkerConfig{
     MaxConcurrentPerformCount: 2,
 }
 
-err = queue.Consume(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     // 处理消息...
 
     // 如果需要丢弃消息，可以使用 Destroy 而不是 Done
     return msg.Destroy(ctx)
 }, bus.WithWorkerConfig(workerConfig))
+if err != nil {
+    log.Fatalf("启动自定义消费者失败: %v", err)
+}
+defer consumer.Stop()
 ```
 
 ### 查找匹配订阅
@@ -190,37 +198,32 @@ import (
 )
 
 // 为每个服务实例（如K8s Pod）创建唯一队列名
-instanceQueueName := fmt.Sprintf("broadcast-receiver-%s", uuid.New().String())
-instanceQueue := bus.Queue(instanceQueueName)
+podQueueName := fmt.Sprintf("broadcast-receiver-%s", uuid.New().String())
+podQueue := bus.Queue(podQueueName)
 
 // 开始消费消息
-err = instanceQueue.Consume(context.Background(), func(ctx context.Context, msg *bus.Inbound) error {
+consumer, err := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     log.Printf("实例 %s 收到广播消息: %s - %s",
-        instanceQueueName, msg.Subject, string(msg.Payload))
+        podQueueName, msg.Subject, string(msg.Payload))
     return msg.Done(ctx)
 })
 if err != nil {
     log.Printf("启动消费者失败: %v", err)
 }
-
+defer consumer.Stop()
 
 // 订阅广播主题
-sub, err := instanceQueue.Subscribe(ctx, "broadcast.events.>")
+sub, err := podQueue.Subscribe(ctx, "broadcast.events.>")
 if err != nil {
     log.Fatalf("创建广播订阅失败: %v", err)
 }
-
-// 在服务关闭时清理资源
-shutdown := func() {
-    ctx := context.Background()
-    if err := sub.Unsubscribe(ctx); err != nil {
+defer func() {
+    if err := sub.Unsubscribe(context.Background()); err != nil {
         log.Printf("取消订阅失败: %v", err)
     }
-    // 其他清理工作...
-}
+}()
 
-// 注册关闭钩子
-// 例如：signal.Notify(...) 或 k8s 优雅关闭处理
+// 其他服务阻塞逻辑
 ```
 
 这种模式特别适用于：

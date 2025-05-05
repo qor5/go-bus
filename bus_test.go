@@ -732,7 +732,7 @@ func TestConsumeWithOptions(t *testing.T) {
 	}
 }
 
-// TestMultipleConsumers now tests starting multiple consumers on the same queue
+// TestMultipleConsumers tests starting multiple consumers on multiple queues
 func TestMultipleConsumers(t *testing.T) {
 	cleanupAllTables()
 

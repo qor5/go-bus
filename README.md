@@ -184,9 +184,9 @@ for _, sub := range queueSubs {
 
 ## Advanced Usage
 
-### Using Random Queue Names for Distributed Broadcast Reception
+### Using Consumer-Specific Nonce in Queue Names for Distributed Broadcast Reception
 
-In distributed environments (like Kubernetes), when you need to ensure that each instance receives the same broadcast message, you can create queues with random names for each instance. This way, each instance will independently receive the same message, achieving a broadcast effect.
+In a distributed environment (such as Kubernetes), when you need to ensure that each instance in the cluster receives the same broadcast message, you can create queues with a consumer-specific nonce in their names for each instance. This way, each instance can independently receive the same message, achieving the broadcast effect.
 
 ```go
 import (

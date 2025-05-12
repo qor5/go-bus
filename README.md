@@ -203,7 +203,7 @@ podQueue := bus.Queue(podQueueName)
 consumer, err := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     log.Printf("Instance %s received broadcast message: %s - %s",
         podQueueName, msg.Subject, string(msg.Payload))
-    return msg.Done(ctx)
+    return msg.Destory(ctx)
 })
 if err != nil {
     log.Printf("Failed to start consumer: %v", err)

@@ -203,7 +203,7 @@ func startBusiness(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitG
 	t.Logf("Business service consumer started")
 
 	_, err = businessQueue.Subscribe(ctx, SubjectIdentityCreated, bus.WithPlanConfig(bus.PlanConfig{
-		RetryPolicy:     bus.DefaultRetryPolicy,
+		RetryPolicy:     bus.DefaultRetryPolicyFactory(),
 		RunAtDelta:      0,
 		UniqueLifecycle: que.Always,
 	}))

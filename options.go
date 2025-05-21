@@ -9,31 +9,39 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
+	"github.com/qor5/go-bus/quex"
 	"github.com/qor5/go-que"
 )
 
-// DefaultRetryPolicy provides a default retry policy for published messages.
-var DefaultRetryPolicy = que.RetryPolicy{
-	InitialInterval:        30 * time.Second,
-	MaxInterval:            600 * time.Second,
-	NextIntervalMultiplier: 2,
-	IntervalRandomPercent:  33,
-	MaxRetryCount:          3,
+// DefaultRetryPolicyFactory provides a default retry policy for published messages.
+var DefaultRetryPolicyFactory = func() que.RetryPolicy {
+	return que.RetryPolicy{
+		InitialInterval:        30 * time.Second,
+		MaxInterval:            600 * time.Second,
+		NextIntervalMultiplier: 2,
+		IntervalRandomPercent:  33,
+		MaxRetryCount:          3,
+	}
 }
 
-// DefaultPlanConfig provides default settings for subscription jobs.
-var DefaultPlanConfig = PlanConfig{
-	RetryPolicy:     DefaultRetryPolicy,
-	RunAtDelta:      0, // Immediate execution
-	UniqueLifecycle: que.Ignore,
+// DefaultPlanConfigFactory provides default settings for subscription jobs.
+var DefaultPlanConfigFactory = func() PlanConfig {
+	return PlanConfig{
+		RetryPolicy:     DefaultRetryPolicyFactory(),
+		RunAtDelta:      0, // Immediate execution
+		UniqueLifecycle: que.Ignore,
+	}
 }
 
-// DefaultWorkerConfig provides default settings for workers.
-var DefaultWorkerConfig = WorkerConfig{
-	MaxLockPerSecond:          5,
-	MaxBufferJobsCount:        0,
-	MaxPerformPerSecond:       1000,
-	MaxConcurrentPerformCount: 200,
+// DefaultWorkerConfigFactory provides default settings for workers.
+var DefaultWorkerConfigFactory = func() WorkerConfig {
+	return WorkerConfig{
+		MaxLockPerSecond:          5,
+		MaxBufferJobsCount:        0,
+		MaxPerformPerSecond:       1000,
+		MaxConcurrentPerformCount: 200,
+		ReconnectBackOff:          quex.DefaultReconnectBackOffFactory(),
+	}
 }
 
 // DefaultMaxEnqueuePerBatch defines the default maximum number of plans
@@ -44,17 +52,20 @@ var DefaultMaxEnqueuePerBatch = 100
 type WorkerConfig struct {
 	// MaxLockPerSecond is maximum frequency of calls to Lock() method of Queue.
 	// Lower number uses lower database CPU resources.
-	MaxLockPerSecond float64 `json:"maxLockPerSecond"`
+	MaxLockPerSecond float64
 
 	// MaxBufferJobsCount is maximum number of jobs in channel that are waiting for
 	// a goroutine to execute them.
-	MaxBufferJobsCount int `json:"maxBufferJobsCount"`
+	MaxBufferJobsCount int
 
 	// MaxPerformPerSecond is maximum frequency of Perform executions.
-	MaxPerformPerSecond float64 `json:"maxPerformPerSecond"`
+	MaxPerformPerSecond float64
 
 	// MaxConcurrentPerformCount is maximum number of goroutines executing Perform simultaneously.
-	MaxConcurrentPerformCount int `json:"maxConcurrentPerformCount"`
+	MaxConcurrentPerformCount int
+
+	// ReconnectBackOff is the backoff strategy for reconnecting to the database.
+	ReconnectBackOff backoff.BackOff
 }
 
 // PlanConfig defines how a queue processes messages for a specific subject pattern.
@@ -97,10 +108,6 @@ type ConsumeOptions struct {
 	// WorkerConfig contains the performance-related settings for a worker.
 	WorkerConfig WorkerConfig
 
-	// ReconnectBackOff configures the reconnection backoff strategy.
-	// If nil, DefaultReconnectBackOffFactory() will be used.
-	ReconnectBackOff backoff.BackOff
-
 	// InboundChannel is the channel that the worker will send messages to.
 	// If set, the handler will not be called, and the messages will be sent to the channel instead.
 	// When a message is received from this channel, you MUST send the error result of your
@@ -112,13 +119,6 @@ type ConsumeOptions struct {
 func WithWorkerConfig(config WorkerConfig) ConsumeOption {
 	return func(opts *ConsumeOptions) {
 		opts.WorkerConfig = config
-	}
-}
-
-// WithReconnectBackOff sets the backoff strategy for reconnection.
-func WithReconnectBackOff(b backoff.BackOff) ConsumeOption {
-	return func(o *ConsumeOptions) {
-		o.ReconnectBackOff = b
 	}
 }
 

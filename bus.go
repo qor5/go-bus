@@ -22,7 +22,7 @@ type QueueImpl struct {
 // Subscribe registers the queue to receive messages published to subjects matching the pattern.
 func (q *QueueImpl) Subscribe(ctx context.Context, pattern string, opts ...SubscribeOption) (Subscription, error) {
 	subscribeOpts := &SubscribeOptions{
-		PlanConfig: DefaultPlanConfig,
+		PlanConfig: DefaultPlanConfigFactory(),
 	}
 
 	for _, opt := range opts {
@@ -47,7 +47,7 @@ func (q *QueueImpl) Subscriptions(ctx context.Context) ([]Subscription, error) {
 // The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
 func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options ...ConsumeOption) (Consumer, error) {
 	opts := &ConsumeOptions{
-		WorkerConfig: DefaultWorkerConfig,
+		WorkerConfig: DefaultWorkerConfigFactory(),
 	}
 
 	for _, opt := range options {
@@ -89,8 +89,8 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 	workerOpts := []quex.StartWorkerOption{
 		quex.WithLogger(q.b.logger),
 	}
-	if opts.ReconnectBackOff != nil {
-		workerOpts = append(workerOpts, quex.WithReconnectBackOff(opts.ReconnectBackOff))
+	if opts.WorkerConfig.ReconnectBackOff != nil {
+		workerOpts = append(workerOpts, quex.WithReconnectBackOff(opts.WorkerConfig.ReconnectBackOff))
 	}
 	controller, err := quex.StartWorker(ctx, workerOptions, workerOpts...)
 	if err != nil {

@@ -69,7 +69,7 @@ if err != nil {
     log.Fatalf("启动消费者失败: %v", err)
 }
 // 确保在完成后停止消费者
-defer consumer.Stop()
+defer consumer.Stop(context.Background())
 
 // 带自定义配置的消费
 workerConfig := bus.WorkerConfig{
@@ -88,7 +88,7 @@ consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inb
 if err != nil {
     log.Fatalf("启动自定义消费者失败: %v", err)
 }
-defer consumer.Stop()
+defer consumer.Stop(context.Background())
 ```
 
 ### 创建订阅
@@ -205,7 +205,7 @@ consumer, err := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.
 if err != nil {
     log.Printf("启动消费者失败: %v", err)
 }
-defer consumer.Stop()
+defer consumer.Stop(context.Background())
 
 // 订阅广播主题
 sub, err := podQueue.Subscribe(ctx, "broadcast.events.>")

@@ -44,11 +44,11 @@ func (q *QueueImpl) Subscriptions(ctx context.Context) ([]Subscription, error) {
 
 type consumer struct {
 	ctx  context.Context
-	stop func(err error)
+	stop func(ctx context.Context) error
 }
 
-func (c *consumer) Stop() {
-	c.stop(nil)
+func (c *consumer) Stop(ctx context.Context) error {
+	return c.stop(ctx)
 }
 
 func (c *consumer) Done() <-chan struct{} {
@@ -83,21 +83,13 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 		opts.ReconnectBackOff = DefaultReconnectBackOffFactory()
 	}
 
-	// lifetime of the consumer
-	consumerCtx, consumerCancel := context.WithCancelCause(context.Background())
-	consumerDoneC := make(chan struct{})
-	consumerStop := func(err error) {
-		consumerCancel(err)
-		<-consumerDoneC
-	}
-
 	startWorker := func() (*que.Worker, error) {
 		return que.NewWorker(que.WorkerOptions{
 			Queue:              q.name,
 			Mutex:              q.b.dialect.GoQue().Mutex(),
 			MaxLockPerSecond:   opts.WorkerConfig.MaxLockPerSecond,
 			MaxBufferJobsCount: opts.WorkerConfig.MaxBufferJobsCount,
-			Perform: func(_ context.Context, job que.Job) error {
+			Perform: func(ctx context.Context, job que.Job) error {
 				inboundMsg, err := InboundFromArgs(job.Plan().Args)
 				if err != nil {
 					return err
@@ -105,16 +97,16 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 				inboundMsg.Job = job
 
 				if opts.InboundChannel == nil {
-					return handler(consumerCtx, inboundMsg)
+					return handler(ctx, inboundMsg)
 				}
 
 				errC := make(chan error, 1)
 				select {
-				case <-consumerCtx.Done():
-					return consumerCtx.Err()
+				case <-ctx.Done():
+					return ctx.Err()
 				case opts.InboundChannel <- &InboundToHandle{
 					Inbound: inboundMsg,
-					Ctx:     consumerCtx,
+					Ctx:     ctx,
 					ErrC:    errC,
 				}:
 					return <-errC
@@ -130,11 +122,15 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 		return nil, errors.Wrap(err, "failed to create worker")
 	}
 
+	// Consumer lifetime
+	consumerCtx, consumerCancel := context.WithCancelCause(context.Background())
+	consumerDoneC := make(chan struct{})
 	var workerMu sync.RWMutex
 
-	// Start a goroutine to run the worker
+	// Start a goroutine to run the consumer
 	go func() (xerr error) {
 		defer close(consumerDoneC)
+		// Ensure consumer lifecycle ends when goroutine exits for any reason
 		defer func() { consumerCancel(xerr) }()
 
 		workerMu.RLock()
@@ -142,14 +138,12 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 		workerMu.RUnlock()
 
 		for {
-			select {
-			case <-consumerCtx.Done():
+			if consumerCtx.Err() != nil {
 				return nil
-			default:
 			}
 
 			err := currentWorker.Run()
-			if err == que.ErrWorkerStoped {
+			if errors.Is(err, que.ErrWorkerStoped) {
 				return nil
 			}
 
@@ -158,7 +152,7 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 			nextBackOff := opts.ReconnectBackOff.NextBackOff()
 			if nextBackOff == backoff.Stop {
 				q.b.logger.Warn("backoff policy indicates no more retries, stopping consumer", "queue", q.name)
-				return errors.New("backoff policy indicates no more retries")
+				return errors.WithStack(ErrReconnectBackOffStopped)
 			}
 
 			select {
@@ -174,6 +168,10 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 			}
 
 			workerMu.Lock()
+			if consumerCtx.Err() != nil {
+				workerMu.Unlock()
+				return nil
+			}
 			worker = newWorker
 			currentWorker = newWorker
 			workerMu.Unlock()
@@ -184,26 +182,36 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 		}
 	}()
 
-	// Start a goroutine to handle graceful shutdown
-	go func() {
-		<-consumerCtx.Done()
+	c := &consumer{
+		ctx: consumerCtx,
+	}
+	c.stop = func(ctx context.Context) error {
+		if consumerCtx.Err() != nil {
+			return errors.Wrap(ErrConsumerStopped, "consumer already stopped")
+		}
+		consumerCancel(nil)
 
 		workerMu.RLock()
 		workerToStop := worker
 		workerMu.RUnlock()
 
 		if workerToStop != nil {
-			err := workerToStop.Stop(context.Background())
+			err := workerToStop.Stop(ctx)
 			if err != nil {
 				q.b.logger.Warn("error stopping worker", "queue", q.name, "error", err)
+				return err
 			}
 		}
-	}()
 
-	return &consumer{
-		ctx:  consumerCtx,
-		stop: consumerStop,
-	}, nil
+		select {
+		case <-consumerDoneC:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return c, nil
 }
 
 var _ Bus = (*BusImpl)(nil)

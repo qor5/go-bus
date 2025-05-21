@@ -74,8 +74,9 @@ type Handler func(ctx context.Context, msg *Inbound) error
 
 // Consumer represents a message consumer that can be stopped.
 type Consumer interface {
-	// Stop stops the consumer and releases any associated resources.
-	Stop()
+	// Stop stops the consumer with the provided context for cancellation/timeout.
+	// Returns an error if the shutdown failed or was interrupted.
+	Stop(ctx context.Context) error
 	// Done returns a channel that is closed when the consumer is stopped.
 	Done() <-chan struct{}
 	// Err returns the error that caused the consumer to stop, or nil if the consumer is still active.

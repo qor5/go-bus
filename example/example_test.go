@@ -199,7 +199,7 @@ func startBusiness(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitG
 		return msg.Done(ctx)
 	})
 	require.NoError(t, err, "Failed to start business service consumer")
-	defer consumer.Stop()
+	defer func() { _ = consumer.Stop(context.Background()) }()
 	t.Logf("Business service consumer started")
 
 	_, err = businessQueue.Subscribe(ctx, SubjectIdentityCreated, bus.WithPlanConfig(bus.PlanConfig{
@@ -249,7 +249,7 @@ func startMarketing(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.Wait
 		return msg.Destroy(ctx)
 	})
 	require.NoError(t, err, "Failed to start marketing service consumer")
-	defer consumer.Stop()
+	defer func() { _ = consumer.Stop(context.Background()) }()
 	t.Logf("Marketing service consumer started")
 
 	_, err = marketingQueue.Subscribe(ctx, SubjectIdentityUpdated)

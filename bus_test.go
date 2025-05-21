@@ -661,7 +661,7 @@ func TestConsume(t *testing.T) {
 		return msg.Done(ctx)
 	})
 	require.NoError(t, err, "Failed to start consumer")
-	defer consumer.Stop()
+	defer func() { _ = consumer.Stop(context.Background()) }()
 
 	// Publish a message with header
 	testPayload := []byte(`["consume_test_payload"]`)
@@ -717,7 +717,7 @@ func TestConsumeWithOptions(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConfig))
 	require.NoError(t, err, "Failed to start consumer with options")
-	defer consumer.Stop()
+	defer func() { _ = consumer.Stop(context.Background()) }()
 
 	// Publish a message
 	testPayload := []byte(`["options_test_payload"]`)
@@ -770,7 +770,7 @@ func TestMultipleConsumers(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start first consumer on queue")
-	defer consumer1.Stop()
+	defer func() { _ = consumer1.Stop(context.Background()) }()
 
 	consumer2, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
 		t.Logf("queue consumer2 received message")
@@ -778,7 +778,7 @@ func TestMultipleConsumers(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start second consumer on queue")
-	defer consumer2.Stop()
+	defer func() { _ = consumer2.Stop(context.Background()) }()
 
 	// Start one consumer on the second queue
 	consumer3, err := queue2.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -787,7 +787,7 @@ func TestMultipleConsumers(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer on queue2")
-	defer consumer3.Stop()
+	defer func() { _ = consumer3.Stop(context.Background()) }()
 
 	// Verify all consumers can be started
 	assert.NotNil(t, consumer1, "First consumer should not be nil")
@@ -934,7 +934,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue1")
-	defer consumer1.Stop()
+	defer func() { _ = consumer1.Stop(context.Background()) }()
 	t.Logf("[%s] Consumer for queue1 setup", time.Since(startTime))
 
 	consumer2, err := queue2.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -943,7 +943,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue2")
-	defer consumer2.Stop()
+	defer func() { _ = consumer2.Stop(context.Background()) }()
 	t.Logf("[%s] Consumer for queue2 setup", time.Since(startTime))
 
 	consumer3, err := queue3.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -952,7 +952,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue3")
-	defer consumer3.Stop()
+	defer func() { _ = consumer3.Stop(context.Background()) }()
 	t.Logf("[%s] Consumer for queue3 setup", time.Since(startTime))
 
 	consumer4, err := queue4.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -961,7 +961,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue4")
-	defer consumer4.Stop()
+	defer func() { _ = consumer4.Stop(context.Background()) }()
 	t.Logf("[%s] All consumers setup complete in %s", time.Since(startTime), time.Since(consumeStartTime))
 
 	// Subscribe with different patterns - 3 will match, 1 won't
@@ -1168,7 +1168,7 @@ func TestWithInboundChannel(t *testing.T) {
 		return nil
 	}, bus.WithInboundChannel(inboundCh))
 	require.NoError(t, err, "Failed to start consumer with channel")
-	defer consumer.Stop()
+	defer func() { _ = consumer.Stop(context.Background()) }()
 
 	// Publish a test message
 	testPayload := []byte(`["channel_test_payload"]`)

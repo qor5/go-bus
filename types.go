@@ -13,7 +13,7 @@ import (
 	"net/http"
 
 	"github.com/qor5/go-bus/quex"
-	"github.com/tnclong/go-que"
+	"github.com/qor5/go-que"
 )
 
 // Subscription represents an active subscription that can be unsubscribed.

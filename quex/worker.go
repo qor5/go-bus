@@ -8,7 +8,7 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/pkg/errors"
-	"github.com/tnclong/go-que"
+	"github.com/qor5/go-que"
 )
 
 var (

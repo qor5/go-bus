@@ -11,10 +11,10 @@ import (
 
 	"github.com/qor5/go-bus"
 	"github.com/qor5/go-bus/pgbus"
+	"github.com/qor5/go-que"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/theplant/testenv"
-	"github.com/tnclong/go-que"
 )
 
 var db *sql.DB

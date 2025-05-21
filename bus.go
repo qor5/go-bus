@@ -8,7 +8,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/qor5/go-bus/quex"
-	"github.com/tnclong/go-que"
+	"github.com/qor5/go-que"
 )
 
 var _ Queue = (*QueueImpl)(nil)

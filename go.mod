@@ -2,15 +2,13 @@ module github.com/qor5/go-bus
 
 go 1.23.0
 
-replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9
-
 require (
 	github.com/cenkalti/backoff/v5 v5.0.2
 	github.com/pkg/errors v0.9.1
+	github.com/qor5/go-que v1.0.0
 	github.com/rs/xid v1.6.0
 	github.com/stretchr/testify v1.10.0
 	github.com/theplant/testenv v0.1.0
-	github.com/tnclong/go-que v0.0.0-20250427075257-87f2def6b0a1
 )
 
 require (

@@ -4,6 +4,7 @@
 package bus
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -39,13 +40,13 @@ var DefaultWorkerConfig = WorkerConfig{
 // that can be enqueued in a single transaction.
 var DefaultMaxEnqueuePerBatch = 100
 
-// DefaultConsumeBackOffFactory generates the default backoff strategy for worker reconnection.
-var DefaultConsumeBackOffFactory = func() backoff.BackOff {
-	expBackoff := backoff.NewExponentialBackOff()
-	expBackoff.InitialInterval = 1 * time.Second
-	expBackoff.MaxInterval = 30 * time.Second
-	expBackoff.Multiplier = 2.0
-	return expBackoff
+// DefaultReconnectBackOffFactory generates the default reconnection backoff strategy for workers.
+var DefaultReconnectBackOffFactory = func() backoff.BackOff {
+	expBackOff := backoff.NewExponentialBackOff()
+	expBackOff.InitialInterval = 1 * time.Second
+	expBackOff.MaxInterval = 30 * time.Second
+	expBackOff.Multiplier = 2.0
+	return expBackOff
 }
 
 // WorkerConfig defines performance-related configuration for workers processing messages.
@@ -94,14 +95,26 @@ func (p PlanConfig) Equal(other PlanConfig) bool {
 // ConsumeOption represents an option for customizing a worker.
 type ConsumeOption func(*ConsumeOptions)
 
+type InboundToHandle struct {
+	*Inbound
+	Ctx  context.Context
+	ErrC chan error
+}
+
 // ConsumeOptions holds all the options for creating a worker.
 type ConsumeOptions struct {
 	// WorkerConfig contains the performance-related settings for a worker.
 	WorkerConfig WorkerConfig
 
-	// Backoff configures the reconnection backoff strategy.
-	// If nil, DefaultBackOffFactory() will be used.
-	Backoff backoff.BackOff
+	// ReconnectBackOff configures the reconnection backoff strategy.
+	// If nil, DefaultReconnectBackOffFactory() will be used.
+	ReconnectBackOff backoff.BackOff
+
+	// InboundChannel is the channel that the worker will send messages to.
+	// If set, the handler will not be called, and the messages will be sent to the channel instead.
+	// When a message is received from this channel, you MUST send the error result of your
+	// message handling logic back to the message's ErrC channel to complete the processing cycle.
+	InboundChannel chan<- *InboundToHandle
 }
 
 // WithWorkerConfig sets the worker configuration for a worker.
@@ -111,10 +124,17 @@ func WithWorkerConfig(config WorkerConfig) ConsumeOption {
 	}
 }
 
-// WithBackoff sets the backoff strategy for reconnection.
-func WithBackoff(b backoff.BackOff) ConsumeOption {
+// WithReconnectBackOff sets the backoff strategy for reconnection.
+func WithReconnectBackOff(b backoff.BackOff) ConsumeOption {
 	return func(o *ConsumeOptions) {
-		o.Backoff = b
+		o.ReconnectBackOff = b
+	}
+}
+
+// WithInboundChannel sets the inbound channel for a worker.
+func WithInboundChannel(ch chan<- *InboundToHandle) ConsumeOption {
+	return func(o *ConsumeOptions) {
+		o.InboundChannel = ch
 	}
 }
 
@@ -188,11 +208,5 @@ func WithHeader(header Header) PublishOption {
 func WithUniqueID(v string) PublishOption {
 	return func(opts *PublishOptions) {
 		opts.UniqueID = UniqueID(v)
-	}
-}
-
-func WithPureUniqueID(v string) PublishOption {
-	return func(opts *PublishOptions) {
-		opts.UniqueID = PureUniqueID(v)
 	}
 }

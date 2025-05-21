@@ -66,48 +66,21 @@ func (c *consumer) Err() error {
 // StartConsumer starts a new message consumer for this queue.
 // The returned Consumer must be stopped by the caller when no longer needed.
 // The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
-func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...ConsumeOption) (Consumer, error) {
+func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options ...ConsumeOption) (Consumer, error) {
 	if ctx.Err() != nil {
 		return nil, errors.Wrap(ctx.Err(), "context is done")
 	}
 
-	consumeOpts := &ConsumeOptions{
+	opts := &ConsumeOptions{
 		WorkerConfig: DefaultWorkerConfig,
 	}
 
-	for _, opt := range opts {
-		opt(consumeOpts)
+	for _, opt := range options {
+		opt(opts)
 	}
 
-	var bkoff backoff.BackOff
-	if consumeOpts.Backoff != nil {
-		bkoff = consumeOpts.Backoff
-	} else {
-		bkoff = DefaultConsumeBackOffFactory()
-	}
-
-	startWorker := func() (*que.Worker, error) {
-		return que.NewWorker(que.WorkerOptions{
-			Queue:              q.name,
-			Mutex:              q.b.dialect.GoQue().Mutex(),
-			MaxLockPerSecond:   consumeOpts.WorkerConfig.MaxLockPerSecond,
-			MaxBufferJobsCount: consumeOpts.WorkerConfig.MaxBufferJobsCount,
-			Perform: func(ctx context.Context, job que.Job) error {
-				inboundMsg, err := InboundFromArgs(job.Plan().Args)
-				if err != nil {
-					return err
-				}
-				inboundMsg.Job = job
-				return handler(ctx, inboundMsg)
-			},
-			MaxPerformPerSecond:       consumeOpts.WorkerConfig.MaxPerformPerSecond,
-			MaxConcurrentPerformCount: consumeOpts.WorkerConfig.MaxConcurrentPerformCount,
-		})
-	}
-
-	worker, err := startWorker()
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create worker")
+	if opts.ReconnectBackOff == nil {
+		opts.ReconnectBackOff = DefaultReconnectBackOffFactory()
 	}
 
 	// lifetime of the consumer
@@ -117,6 +90,46 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...
 		consumerCancel(err)
 		<-consumerDoneC
 	}
+
+	startWorker := func() (*que.Worker, error) {
+		return que.NewWorker(que.WorkerOptions{
+			Queue:              q.name,
+			Mutex:              q.b.dialect.GoQue().Mutex(),
+			MaxLockPerSecond:   opts.WorkerConfig.MaxLockPerSecond,
+			MaxBufferJobsCount: opts.WorkerConfig.MaxBufferJobsCount,
+			Perform: func(_ context.Context, job que.Job) error {
+				inboundMsg, err := InboundFromArgs(job.Plan().Args)
+				if err != nil {
+					return err
+				}
+				inboundMsg.Job = job
+
+				if opts.InboundChannel == nil {
+					return handler(consumerCtx, inboundMsg)
+				}
+
+				errC := make(chan error, 1)
+				select {
+				case <-consumerCtx.Done():
+					return consumerCtx.Err()
+				case opts.InboundChannel <- &InboundToHandle{
+					Inbound: inboundMsg,
+					Ctx:     consumerCtx,
+					ErrC:    errC,
+				}:
+					return <-errC
+				}
+			},
+			MaxPerformPerSecond:       opts.WorkerConfig.MaxPerformPerSecond,
+			MaxConcurrentPerformCount: opts.WorkerConfig.MaxConcurrentPerformCount,
+		})
+	}
+
+	worker, err := startWorker()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create worker")
+	}
+
 	var workerMu sync.RWMutex
 
 	// Start a goroutine to run the worker
@@ -142,8 +155,8 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...
 
 			q.b.logger.Warn("worker error, will attempt to recreate", "queue", q.name, "error", err)
 
-			nextBackoff := bkoff.NextBackOff()
-			if nextBackoff == backoff.Stop {
+			nextBackOff := opts.ReconnectBackOff.NextBackOff()
+			if nextBackOff == backoff.Stop {
 				q.b.logger.Warn("backoff policy indicates no more retries, stopping consumer", "queue", q.name)
 				return errors.New("backoff policy indicates no more retries")
 			}
@@ -151,7 +164,7 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...
 			select {
 			case <-consumerCtx.Done():
 				return nil
-			case <-time.After(nextBackoff):
+			case <-time.After(nextBackOff):
 			}
 
 			newWorker, err := startWorker()
@@ -167,7 +180,7 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...
 
 			q.b.logger.Info("worker successfully recreated", "queue", q.name)
 
-			bkoff.Reset()
+			opts.ReconnectBackOff.Reset()
 		}
 	}()
 

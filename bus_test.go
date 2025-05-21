@@ -3,7 +3,9 @@ package bus_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1142,4 +1144,78 @@ func drainChannel(ch chan *bus.Inbound) {
 	default:
 		// Channel already empty
 	}
+}
+
+// TestWithInboundChannel tests the channel-based message processing functionality
+func TestWithInboundChannel(t *testing.T) {
+	b, queue, _ := setupBusAndQueues(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Subscribe to a test topic
+	_, err := queue.Subscribe(ctx, "test.channel")
+	require.NoError(t, err, "Failed to subscribe")
+
+	// Create channel to receive messages
+	inboundCh := make(chan *bus.InboundToHandle, 5)
+
+	// Start consumer with the channel option
+	var calledHandler atomic.Bool
+	consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+		// Just to verify this handler should not be called if we use the inbound channel
+		calledHandler.Store(true)
+		return nil
+	}, bus.WithInboundChannel(inboundCh))
+	require.NoError(t, err, "Failed to start consumer with channel")
+	defer consumer.Stop()
+
+	// Publish a test message
+	testPayload := []byte(`["channel_test_payload"]`)
+	testHeader := bus.Header{"X-Test-Header": []string{"test-value"}}
+
+	err = b.Publish(ctx, "test.channel", testPayload, bus.WithHeader(testHeader))
+	require.NoError(t, err, "Failed to publish message")
+
+	// Wait for message or timeout
+	var receivedMsg *bus.InboundToHandle
+	select {
+	case receivedMsg = <-inboundCh:
+		// Message received, verify it
+		assert.Equal(t, "test.channel", receivedMsg.Subject, "Message subject mismatch")
+		assert.Equal(t, testPayload, receivedMsg.Payload, "Message payload mismatch")
+		assert.Equal(t, "test-value", receivedMsg.Header.Get("X-Test-Header"), "Header mismatch")
+		assert.NotNil(t, receivedMsg.ErrC, "Error channel should not be nil")
+		assert.NotNil(t, receivedMsg.Ctx, "Context should not be nil")
+
+		// Send the result back through the error channel
+		receivedMsg.ErrC <- receivedMsg.Done(receivedMsg.Ctx)
+	case <-consumer.Done():
+		t.Fatalf("Consumer stopped: %v", consumer.Err())
+	}
+
+	// Verify we can send multiple messages and process them in the channel
+	for i := 1; i <= 3; i++ {
+		payload := []byte(fmt.Sprintf(`["message_%d"]`, i))
+		err = b.Publish(ctx, "test.channel", payload)
+		require.NoError(t, err, fmt.Sprintf("Failed to publish message %d", i))
+	}
+
+	// Process all messages
+	for i := 1; i <= 3; i++ {
+		select {
+		case msg := <-inboundCh:
+			t.Logf("Received message %d", i)
+			assert.Equal(t, "test.channel", msg.Subject, "Message subject mismatch")
+			// Complete processing
+			msg.ErrC <- msg.Done(msg.Ctx)
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for message %d", i)
+		case <-consumer.Done():
+			t.Fatalf("Consumer stopped: %v", consumer.Err())
+		}
+	}
+
+	// Verify handler was not called
+	assert.False(t, calledHandler.Load(), "Handler should not have been called")
 }

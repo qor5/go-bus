@@ -1,6 +1,6 @@
 # go-bus
 
-一个基于 PostgreSQL 的简单可靠发布/订阅消息总线系统，为 Go 应用程序提供可靠的消息传递功能。基于 [github.com/tnclong/go-que](https://github.com/tnclong/go-que) 实现。
+一个基于 PostgreSQL 的简单可靠发布/订阅消息总线系统，为 Go 应用程序提供可靠的消息传递功能。基于 [tnclong/go-que](https://github.com/tnclong/go-que) 实现。
 
 ## 特性
 
@@ -15,12 +15,6 @@
 
 ```bash
 go get github.com/qor5/go-bus
-```
-
-为了确保正常运行，需要在您的 `go.mod` 文件中添加以下替换指令：
-
-```go
-replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9
 ```
 
 ## 快速开始
@@ -303,4 +297,4 @@ sub2, err := queue2.Subscribe(ctx, "orders.created", bus.WithPlanConfig(customPl
 
 ## 致谢
 
-本项目基于 [github.com/tnclong/go-que](https://github.com/tnclong/go-que) - 一个高性能的 PostgreSQL 后端作业队列
+本项目基于 [tnclong/go-que](https://github.com/tnclong/go-que) - 一个高性能的 PostgreSQL 后端作业队列

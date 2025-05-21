@@ -10,8 +10,8 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/qor5/go-bus"
-	"github.com/tnclong/go-que"
-	"github.com/tnclong/go-que/pg"
+	"github.com/qor5/go-que"
+	"github.com/qor5/go-que/pg"
 )
 
 var _ bus.Dialect = (*Dialect)(nil)

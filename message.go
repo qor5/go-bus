@@ -7,7 +7,7 @@ import (
 	"net/textproto"
 
 	"github.com/pkg/errors"
-	"github.com/tnclong/go-que"
+	"github.com/qor5/go-que"
 )
 
 func (m *Message) ToRaw() json.RawMessage {

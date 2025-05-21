@@ -2,7 +2,7 @@
 
 [中文版本](./README_ZH.md)
 
-A simple and reliable PostgreSQL-based publish/subscribe message bus system for Go applications. Built on top of [github.com/tnclong/go-que](https://github.com/tnclong/go-que).
+A simple and reliable PostgreSQL-based publish/subscribe message bus system for Go applications. Built on top of [tnclong/go-que](https://github.com/tnclong/go-que).
 
 ## Features
 
@@ -17,12 +17,6 @@ A simple and reliable PostgreSQL-based publish/subscribe message bus system for 
 
 ```bash
 go get github.com/qor5/go-bus
-```
-
-For proper functionality, you need to add the following replace directive to your `go.mod` file:
-
-```go
-replace github.com/tnclong/go-que => github.com/molon/go-que v0.0.0-20250504113152-4941cc99f7e9
 ```
 
 ## Quick Start
@@ -306,4 +300,4 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Acknowledgments
 
-This project is based on [github.com/tnclong/go-que](https://github.com/tnclong/go-que) - a high-performance PostgreSQL backend job queue.
+This project is based on [tnclong/go-que](https://github.com/tnclong/go-que) - a high-performance PostgreSQL backend job queue.

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
-	"github.com/tnclong/go-que"
+	"github.com/qor5/go-que"
 )
 
 // DefaultRetryPolicy provides a default retry policy for published messages.

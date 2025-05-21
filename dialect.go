@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/tnclong/go-que"
+	"github.com/qor5/go-que"
 )
 
 // Dialect defines the interface for database-specific implementations of the message bus.

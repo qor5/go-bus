@@ -40,15 +40,6 @@ var DefaultWorkerConfig = WorkerConfig{
 // that can be enqueued in a single transaction.
 var DefaultMaxEnqueuePerBatch = 100
 
-// DefaultReconnectBackOffFactory generates the default reconnection backoff strategy for workers.
-var DefaultReconnectBackOffFactory = func() backoff.BackOff {
-	expBackOff := backoff.NewExponentialBackOff()
-	expBackOff.InitialInterval = 1 * time.Second
-	expBackOff.MaxInterval = 30 * time.Second
-	expBackOff.Multiplier = 2.0
-	return expBackOff
-}
-
 // WorkerConfig defines performance-related configuration for workers processing messages.
 type WorkerConfig struct {
 	// MaxLockPerSecond is maximum frequency of calls to Lock() method of Queue.

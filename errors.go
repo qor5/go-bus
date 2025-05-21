@@ -24,7 +24,4 @@ var (
 
 	// ErrConsumerStopped is returned when the consumer is already normally stopped.
 	ErrConsumerStopped = errors.New("consumer already normally stopped")
-
-	// ErrReconnectBackOffStopped is returned when the reconnection backoff policy indicates no more retries should be attempted.
-	ErrReconnectBackOffStopped = errors.New("reconnect backoff policy indicates no more retries")
 )

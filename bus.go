@@ -65,22 +65,7 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 				return err
 			}
 			inboundMsg.Job = job
-
-			if opts.InboundChannel == nil {
-				return handler(ctx, inboundMsg)
-			}
-
-			errC := make(chan error, 1)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case opts.InboundChannel <- &InboundToHandle{
-				Inbound: inboundMsg,
-				Ctx:     ctx,
-				ErrC:    errC,
-			}:
-				return <-errC
-			}
+			return handler(ctx, inboundMsg)
 		},
 		MaxPerformPerSecond:       opts.WorkerConfig.MaxPerformPerSecond,
 		MaxConcurrentPerformCount: opts.WorkerConfig.MaxConcurrentPerformCount,

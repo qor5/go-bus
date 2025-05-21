@@ -4,7 +4,6 @@
 package bus
 
 import (
-	"context"
 	"log/slog"
 	"time"
 
@@ -97,35 +96,16 @@ func (p PlanConfig) Equal(other PlanConfig) bool {
 // ConsumeOption represents an option for customizing a worker.
 type ConsumeOption func(*ConsumeOptions)
 
-type InboundToHandle struct {
-	*Inbound
-	Ctx  context.Context
-	ErrC chan error
-}
-
 // ConsumeOptions holds all the options for creating a worker.
 type ConsumeOptions struct {
 	// WorkerConfig contains the performance-related settings for a worker.
 	WorkerConfig WorkerConfig
-
-	// InboundChannel is the channel that the worker will send messages to.
-	// If set, the handler will not be called, and the messages will be sent to the channel instead.
-	// When a message is received from this channel, you MUST send the error result of your
-	// message handling logic back to the message's ErrC channel to complete the processing cycle.
-	InboundChannel chan<- *InboundToHandle
 }
 
 // WithWorkerConfig sets the worker configuration for a worker.
 func WithWorkerConfig(config WorkerConfig) ConsumeOption {
 	return func(opts *ConsumeOptions) {
 		opts.WorkerConfig = config
-	}
-}
-
-// WithInboundChannel sets the inbound channel for a worker.
-func WithInboundChannel(ch chan<- *InboundToHandle) ConsumeOption {
-	return func(o *ConsumeOptions) {
-		o.InboundChannel = ch
 	}
 }
 

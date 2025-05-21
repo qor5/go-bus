@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1158,15 +1157,27 @@ func TestWithInboundChannel(t *testing.T) {
 	require.NoError(t, err, "Failed to subscribe")
 
 	// Create channel to receive messages
-	inboundCh := make(chan *bus.InboundToHandle, 5)
+	type inboundToHandle struct {
+		*bus.Inbound
+		Ctx  context.Context
+		ErrC chan error
+	}
+	inboundCh := make(chan *inboundToHandle, 5)
 
 	// Start consumer with the channel option
-	var calledHandler atomic.Bool
 	consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
-		// Just to verify this handler should not be called if we use the inbound channel
-		calledHandler.Store(true)
-		return nil
-	}, bus.WithInboundChannel(inboundCh))
+		errC := make(chan error, 1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case inboundCh <- &inboundToHandle{
+			Inbound: msg,
+			Ctx:     ctx,
+			ErrC:    errC,
+		}:
+			return <-errC
+		}
+	})
 	require.NoError(t, err, "Failed to start consumer with channel")
 	defer func() { _ = consumer.Stop(context.Background()) }()
 
@@ -1178,7 +1189,7 @@ func TestWithInboundChannel(t *testing.T) {
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for message or timeout
-	var receivedMsg *bus.InboundToHandle
+	var receivedMsg *inboundToHandle
 	select {
 	case receivedMsg = <-inboundCh:
 		// Message received, verify it
@@ -1215,7 +1226,4 @@ func TestWithInboundChannel(t *testing.T) {
 			t.Fatalf("Consumer stopped: %v", consumer.Err())
 		}
 	}
-
-	// Verify handler was not called
-	assert.False(t, calledHandler.Load(), "Handler should not have been called")
 }

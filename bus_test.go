@@ -3,7 +3,9 @@ package bus_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -659,7 +661,7 @@ func TestConsume(t *testing.T) {
 		return msg.Done(ctx)
 	})
 	require.NoError(t, err, "Failed to start consumer")
-	defer consumer.Stop()
+	defer func() { _ = consumer.Stop(context.Background()) }()
 
 	// Publish a message with header
 	testPayload := []byte(`["consume_test_payload"]`)
@@ -715,7 +717,7 @@ func TestConsumeWithOptions(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConfig))
 	require.NoError(t, err, "Failed to start consumer with options")
-	defer consumer.Stop()
+	defer func() { _ = consumer.Stop(context.Background()) }()
 
 	// Publish a message
 	testPayload := []byte(`["options_test_payload"]`)
@@ -768,7 +770,7 @@ func TestMultipleConsumers(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start first consumer on queue")
-	defer consumer1.Stop()
+	defer func() { _ = consumer1.Stop(context.Background()) }()
 
 	consumer2, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
 		t.Logf("queue consumer2 received message")
@@ -776,7 +778,7 @@ func TestMultipleConsumers(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start second consumer on queue")
-	defer consumer2.Stop()
+	defer func() { _ = consumer2.Stop(context.Background()) }()
 
 	// Start one consumer on the second queue
 	consumer3, err := queue2.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -785,7 +787,7 @@ func TestMultipleConsumers(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer on queue2")
-	defer consumer3.Stop()
+	defer func() { _ = consumer3.Stop(context.Background()) }()
 
 	// Verify all consumers can be started
 	assert.NotNil(t, consumer1, "First consumer should not be nil")
@@ -932,7 +934,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue1")
-	defer consumer1.Stop()
+	defer func() { _ = consumer1.Stop(context.Background()) }()
 	t.Logf("[%s] Consumer for queue1 setup", time.Since(startTime))
 
 	consumer2, err := queue2.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -941,7 +943,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue2")
-	defer consumer2.Stop()
+	defer func() { _ = consumer2.Stop(context.Background()) }()
 	t.Logf("[%s] Consumer for queue2 setup", time.Since(startTime))
 
 	consumer3, err := queue3.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -950,7 +952,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue3")
-	defer consumer3.Stop()
+	defer func() { _ = consumer3.Stop(context.Background()) }()
 	t.Logf("[%s] Consumer for queue3 setup", time.Since(startTime))
 
 	consumer4, err := queue4.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -959,7 +961,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		return msg.Done(ctx)
 	}, bus.WithWorkerConfig(workerConf))
 	require.NoError(t, err, "Failed to start consumer for queue4")
-	defer consumer4.Stop()
+	defer func() { _ = consumer4.Stop(context.Background()) }()
 	t.Logf("[%s] All consumers setup complete in %s", time.Since(startTime), time.Since(consumeStartTime))
 
 	// Subscribe with different patterns - 3 will match, 1 won't
@@ -1142,4 +1144,78 @@ func drainChannel(ch chan *bus.Inbound) {
 	default:
 		// Channel already empty
 	}
+}
+
+// TestWithInboundChannel tests the channel-based message processing functionality
+func TestWithInboundChannel(t *testing.T) {
+	b, queue, _ := setupBusAndQueues(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Subscribe to a test topic
+	_, err := queue.Subscribe(ctx, "test.channel")
+	require.NoError(t, err, "Failed to subscribe")
+
+	// Create channel to receive messages
+	inboundCh := make(chan *bus.InboundToHandle, 5)
+
+	// Start consumer with the channel option
+	var calledHandler atomic.Bool
+	consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+		// Just to verify this handler should not be called if we use the inbound channel
+		calledHandler.Store(true)
+		return nil
+	}, bus.WithInboundChannel(inboundCh))
+	require.NoError(t, err, "Failed to start consumer with channel")
+	defer func() { _ = consumer.Stop(context.Background()) }()
+
+	// Publish a test message
+	testPayload := []byte(`["channel_test_payload"]`)
+	testHeader := bus.Header{"X-Test-Header": []string{"test-value"}}
+
+	err = b.Publish(ctx, "test.channel", testPayload, bus.WithHeader(testHeader))
+	require.NoError(t, err, "Failed to publish message")
+
+	// Wait for message or timeout
+	var receivedMsg *bus.InboundToHandle
+	select {
+	case receivedMsg = <-inboundCh:
+		// Message received, verify it
+		assert.Equal(t, "test.channel", receivedMsg.Subject, "Message subject mismatch")
+		assert.Equal(t, testPayload, receivedMsg.Payload, "Message payload mismatch")
+		assert.Equal(t, "test-value", receivedMsg.Header.Get("X-Test-Header"), "Header mismatch")
+		assert.NotNil(t, receivedMsg.ErrC, "Error channel should not be nil")
+		assert.NotNil(t, receivedMsg.Ctx, "Context should not be nil")
+
+		// Send the result back through the error channel
+		receivedMsg.ErrC <- receivedMsg.Done(receivedMsg.Ctx)
+	case <-consumer.Done():
+		t.Fatalf("Consumer stopped: %v", consumer.Err())
+	}
+
+	// Verify we can send multiple messages and process them in the channel
+	for i := 1; i <= 3; i++ {
+		payload := []byte(fmt.Sprintf(`["message_%d"]`, i))
+		err = b.Publish(ctx, "test.channel", payload)
+		require.NoError(t, err, fmt.Sprintf("Failed to publish message %d", i))
+	}
+
+	// Process all messages
+	for i := 1; i <= 3; i++ {
+		select {
+		case msg := <-inboundCh:
+			t.Logf("Received message %d", i)
+			assert.Equal(t, "test.channel", msg.Subject, "Message subject mismatch")
+			// Complete processing
+			msg.ErrC <- msg.Done(msg.Ctx)
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for message %d", i)
+		case <-consumer.Done():
+			t.Fatalf("Consumer stopped: %v", consumer.Err())
+		}
+	}
+
+	// Verify handler was not called
+	assert.False(t, calledHandler.Load(), "Handler should not have been called")
 }

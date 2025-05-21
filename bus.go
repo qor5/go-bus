@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cenkalti/backoff/v5"
 	"github.com/pkg/errors"
+	"github.com/qor5/go-bus/quex"
 	"github.com/tnclong/go-que"
 )
 
@@ -42,155 +42,87 @@ func (q *QueueImpl) Subscriptions(ctx context.Context) ([]Subscription, error) {
 	return q.b.dialect.ByQueue(ctx, q.name)
 }
 
+// StartConsumer starts a new message consumer for this queue.
+// The returned Consumer must be stopped by the caller when no longer needed.
+// The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
+func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options ...ConsumeOption) (Consumer, error) {
+	opts := &ConsumeOptions{
+		WorkerConfig: DefaultWorkerConfig,
+	}
+
+	for _, opt := range options {
+		opt(opts)
+	}
+
+	workerOptions := que.WorkerOptions{
+		Queue:              q.name,
+		Mutex:              q.b.dialect.GoQue().Mutex(),
+		MaxLockPerSecond:   opts.WorkerConfig.MaxLockPerSecond,
+		MaxBufferJobsCount: opts.WorkerConfig.MaxBufferJobsCount,
+		Perform: func(ctx context.Context, job que.Job) error {
+			inboundMsg, err := InboundFromArgs(job.Plan().Args)
+			if err != nil {
+				return err
+			}
+			inboundMsg.Job = job
+
+			if opts.InboundChannel == nil {
+				return handler(ctx, inboundMsg)
+			}
+
+			errC := make(chan error, 1)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case opts.InboundChannel <- &InboundToHandle{
+				Inbound: inboundMsg,
+				Ctx:     ctx,
+				ErrC:    errC,
+			}:
+				return <-errC
+			}
+		},
+		MaxPerformPerSecond:       opts.WorkerConfig.MaxPerformPerSecond,
+		MaxConcurrentPerformCount: opts.WorkerConfig.MaxConcurrentPerformCount,
+	}
+
+	workerOpts := []quex.StartWorkerOption{
+		quex.WithLogger(q.b.logger),
+	}
+	if opts.ReconnectBackOff != nil {
+		workerOpts = append(workerOpts, quex.WithReconnectBackOff(opts.ReconnectBackOff))
+	}
+	controller, err := quex.StartWorker(ctx, workerOptions, workerOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return &consumer{controller: controller}, nil
+}
+
+// consumer adapts a quex.WorkerController to the Consumer interface
+// and ensures consistent error handling, particularly for stopped errors.
 type consumer struct {
-	ctx  context.Context
-	stop func(err error)
+	controller quex.WorkerController
 }
 
-func (c *consumer) Stop() {
-	c.stop(nil)
-}
-
-func (c *consumer) Done() <-chan struct{} {
-	return c.ctx.Done()
-}
-
-func (c *consumer) Err() error {
-	err := context.Cause(c.ctx)
-	if errors.Is(err, context.Canceled) { // if no cause
-		return ErrConsumerStopped // ensure not nil
+func (w *consumer) Stop(ctx context.Context) error {
+	err := w.controller.Stop(ctx)
+	if errors.Is(err, quex.ErrWorkerStopped) {
+		return errors.WithStack(ErrConsumerStopped)
 	}
 	return err
 }
 
-// StartConsumer starts a new message consumer for this queue.
-// The returned Consumer must be stopped by the caller when no longer needed.
-// The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
-func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, opts ...ConsumeOption) (Consumer, error) {
-	if ctx.Err() != nil {
-		return nil, errors.Wrap(ctx.Err(), "context is done")
+func (w *consumer) Done() <-chan struct{} {
+	return w.controller.Done()
+}
+
+func (w *consumer) Err() error {
+	err := w.controller.Err()
+	if errors.Is(err, quex.ErrWorkerStopped) {
+		return errors.WithStack(ErrConsumerStopped)
 	}
-
-	consumeOpts := &ConsumeOptions{
-		WorkerConfig: DefaultWorkerConfig,
-	}
-
-	for _, opt := range opts {
-		opt(consumeOpts)
-	}
-
-	var bkoff backoff.BackOff
-	if consumeOpts.Backoff != nil {
-		bkoff = consumeOpts.Backoff
-	} else {
-		bkoff = DefaultConsumeBackOffFactory()
-	}
-
-	startWorker := func() (*que.Worker, error) {
-		return que.NewWorker(que.WorkerOptions{
-			Queue:              q.name,
-			Mutex:              q.b.dialect.GoQue().Mutex(),
-			MaxLockPerSecond:   consumeOpts.WorkerConfig.MaxLockPerSecond,
-			MaxBufferJobsCount: consumeOpts.WorkerConfig.MaxBufferJobsCount,
-			Perform: func(ctx context.Context, job que.Job) error {
-				inboundMsg, err := InboundFromArgs(job.Plan().Args)
-				if err != nil {
-					return err
-				}
-				inboundMsg.Job = job
-				return handler(ctx, inboundMsg)
-			},
-			MaxPerformPerSecond:       consumeOpts.WorkerConfig.MaxPerformPerSecond,
-			MaxConcurrentPerformCount: consumeOpts.WorkerConfig.MaxConcurrentPerformCount,
-		})
-	}
-
-	worker, err := startWorker()
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create worker")
-	}
-
-	// lifetime of the consumer
-	consumerCtx, consumerCancel := context.WithCancelCause(context.Background())
-	consumerDoneC := make(chan struct{})
-	consumerStop := func(err error) {
-		consumerCancel(err)
-		<-consumerDoneC
-	}
-	var workerMu sync.RWMutex
-
-	// Start a goroutine to run the worker
-	go func() (xerr error) {
-		defer close(consumerDoneC)
-		defer func() { consumerCancel(xerr) }()
-
-		workerMu.RLock()
-		currentWorker := worker
-		workerMu.RUnlock()
-
-		for {
-			select {
-			case <-consumerCtx.Done():
-				return nil
-			default:
-			}
-
-			err := currentWorker.Run()
-			if err == que.ErrWorkerStoped {
-				return nil
-			}
-
-			q.b.logger.Warn("worker error, will attempt to recreate", "queue", q.name, "error", err)
-
-			nextBackoff := bkoff.NextBackOff()
-			if nextBackoff == backoff.Stop {
-				q.b.logger.Warn("backoff policy indicates no more retries, stopping consumer", "queue", q.name)
-				return errors.New("backoff policy indicates no more retries")
-			}
-
-			select {
-			case <-consumerCtx.Done():
-				return nil
-			case <-time.After(nextBackoff):
-			}
-
-			newWorker, err := startWorker()
-			if err != nil {
-				q.b.logger.Error("failed to recreate worker, stopping consumer", "queue", q.name, "error", err)
-				return errors.Wrap(err, "failed to recreate worker, stopping consumer")
-			}
-
-			workerMu.Lock()
-			worker = newWorker
-			currentWorker = newWorker
-			workerMu.Unlock()
-
-			q.b.logger.Info("worker successfully recreated", "queue", q.name)
-
-			bkoff.Reset()
-		}
-	}()
-
-	// Start a goroutine to handle graceful shutdown
-	go func() {
-		<-consumerCtx.Done()
-
-		workerMu.RLock()
-		workerToStop := worker
-		workerMu.RUnlock()
-
-		if workerToStop != nil {
-			err := workerToStop.Stop(context.Background())
-			if err != nil {
-				q.b.logger.Warn("error stopping worker", "queue", q.name, "error", err)
-			}
-		}
-	}()
-
-	return &consumer{
-		ctx:  consumerCtx,
-		stop: consumerStop,
-	}, nil
+	return err
 }
 
 var _ Bus = (*BusImpl)(nil)

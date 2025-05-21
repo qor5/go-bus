@@ -71,7 +71,7 @@ if err != nil {
     log.Fatalf("Failed to start consumer: %v", err)
 }
 // Ensure consumer is stopped when done
-defer consumer.Stop()
+defer consumer.Stop(context.Background())
 
 // Consumption with custom worker configuration
 workerConfig := bus.WorkerConfig{
@@ -90,7 +90,7 @@ consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inb
 if err != nil {
     log.Fatalf("Failed to start consumer with options: %v", err)
 }
-defer consumer.Stop()
+defer consumer.Stop(context.Background())
 ```
 
 ### Creating Subscriptions
@@ -208,7 +208,7 @@ consumer, err := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.
 if err != nil {
     log.Printf("Failed to start consumer: %v", err)
 }
-defer consumer.Stop()
+defer consumer.Stop(context.Background())
 
 // Subscribe to broadcast topics
 sub, err := podQueue.Subscribe(ctx, "broadcast.events.>")

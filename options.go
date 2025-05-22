@@ -125,9 +125,14 @@ func WithPlanConfig(config PlanConfig) SubscribeOption {
 	}
 }
 
+// DialectDecorator is a function that decorates a Dialect with additional functionality.
+// It can return an error if the decoration process fails.
+type DialectDecorator func(Dialect) (Dialect, error)
+
 // BusOptions configures the Bus implementation.
 type BusOptions struct {
 	// Migrate controls whether database migrations are run during initialization.
+	// Default is true.
 	Migrate bool
 
 	// Logger is used for logging warnings and errors. If nil, a default logger will be used.
@@ -137,6 +142,11 @@ type BusOptions struct {
 	// If the number of plans exceeds this limit, they will be split into multiple transactions.
 	// If less than or equal to 0, DefaultMaxEnqueuePerBatch will be used.
 	MaxEnqueuePerBatch int
+
+	// DialectDecorator provides a way to decorate the base dialect implementation with additional
+	// functionality such as caching, metrics, or logging. If nil, the dialect is used as-is.
+	// This is applied after the dialect is created but before any operations are performed.
+	DialectDecorator DialectDecorator
 }
 
 type BusOption func(*BusOptions)
@@ -160,6 +170,37 @@ func WithMigrate(migrate bool) BusOption {
 func WithMaxEnqueuePerBatch(max int) BusOption {
 	return func(opts *BusOptions) {
 		opts.MaxEnqueuePerBatch = max
+	}
+}
+
+// WithDialectDecorator adds a decorator to the dialect.
+// Multiple decorators can be composed together and will be applied in the order provided.
+// If any decorator returns an error during application, the error will be returned from New.
+func WithDialectDecorator(decorators ...DialectDecorator) BusOption {
+	return func(opts *BusOptions) {
+		if opts.DialectDecorator != nil {
+			decorators = append(decorators, opts.DialectDecorator)
+		}
+
+		if len(decorators) == 0 {
+			return
+		}
+
+		if len(decorators) == 1 {
+			opts.DialectDecorator = decorators[0]
+			return
+		}
+
+		opts.DialectDecorator = func(next Dialect) (Dialect, error) {
+			var err error
+			for i := len(decorators); i > 0; i-- {
+				next, err = decorators[i-1](next)
+				if err != nil {
+					return nil, err
+				}
+			}
+			return next, nil
+		}
 	}
 }
 

@@ -142,6 +142,15 @@ func New(dialect Dialect, opts ...BusOption) (Bus, error) {
 		return nil, errors.New("go-que implementation is required")
 	}
 
+	// Apply dialect decorator if provided
+	if busOpts.DialectDecorator != nil {
+		var err error
+		dialect, err = busOpts.DialectDecorator(dialect)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to apply dialect decorator")
+		}
+	}
+
 	b := &BusImpl{
 		dialect:            dialect,
 		queues:             make(map[string]Queue),

@@ -48,6 +48,18 @@ func (d *Dialect) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, er
 
 var MaxMigrationAttempts = 10
 
+// GetMetadata retrieves the current bus metadata
+func (d *Dialect) GetMetadata(ctx context.Context) (*bus.Metadata, error) {
+	var meta bus.Metadata
+	err := d.db.QueryRowContext(ctx,
+		"SELECT version, updated_at, total_subscriptions FROM gobus_metadata LIMIT 1").
+		Scan(&meta.Version, &meta.UpdatedAt, &meta.TotalSubscriptions)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to query metadata")
+	}
+	return &meta, nil
+}
+
 // Migrate creates the subscriptions table and indexes.
 func Migrate(ctx context.Context, db *sql.DB) error {
 	f := func() error {
@@ -71,6 +83,23 @@ func Migrate(ctx context.Context, db *sql.DB) error {
     -- Index for queue lookups
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_queue_idx 
         ON gobus_subscriptions (queue);
+        
+    -- Index for created_at and updated_at
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_created_at_idx
+        ON gobus_subscriptions (created_at);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_updated_at_idx
+        ON gobus_subscriptions (updated_at);
+        
+    CREATE TABLE IF NOT EXISTS gobus_metadata (
+        version BIGINT NOT NULL DEFAULT 1,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        total_subscriptions BIGINT NOT NULL DEFAULT 0
+    );
+    
+    -- Insert initial metadata row if it doesn't exist
+    INSERT INTO gobus_metadata (version, updated_at, total_subscriptions)
+    SELECT 1, NOW(), (SELECT COUNT(*) FROM gobus_subscriptions)
+    WHERE NOT EXISTS (SELECT 1 FROM gobus_metadata);
     `)
 		if err != nil {
 			return errors.Wrap(err, "failed to create subscriptions table and indexes")
@@ -145,9 +174,9 @@ func (d *Dialect) BySubject(ctx context.Context, subject string) ([]bus.Subscrip
 	rows, err := d.db.QueryContext(
 		ctx,
 		`SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at
-         FROM gobus_subscriptions
-         WHERE $1 ~ regex_pattern
-         ORDER BY id ASC`,
+		 FROM gobus_subscriptions
+		 WHERE $1 ~ regex_pattern
+		 ORDER BY id ASC`,
 		subject,
 	)
 	if err != nil {
@@ -207,7 +236,7 @@ func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) 
 }
 
 // Upsert creates or updates a subscription.
-func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig bus.PlanConfig) (bus.Subscription, error) {
+func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig bus.PlanConfig) (_ bus.Subscription, xerr error) {
 	if strings.TrimSpace(queue) == "" {
 		return nil, errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -227,6 +256,7 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		return nil, err
 	}
 
+	// Skip update if subscription exists and is identical
 	if existingSub != nil {
 		if existingSub.pattern == pattern &&
 			existingSub.queue == queue &&
@@ -236,7 +266,17 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		}
 	}
 
-	rows, err := d.db.QueryContext(
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to begin transaction")
+	}
+	defer func() {
+		if xerr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryContext(
 		ctx,
 		`INSERT INTO gobus_subscriptions 
          (queue, pattern, regex_pattern, plan, created_at, updated_at) 
@@ -259,6 +299,14 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		return nil, err
 	}
 
+	if err := d.updateMetadata(ctx, tx); err != nil {
+		return nil, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return nil, errors.Wrap(err, "failed to commit transaction")
+	}
+
 	if len(subs) == 0 {
 		return nil, bus.ErrSubscriptionNotFound
 	}
@@ -266,8 +314,31 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 	return subs[0], nil
 }
 
+// updateMetadata updates the version and total_subscriptions count in gobus_metadata table
+func (d *Dialect) updateMetadata(ctx context.Context, tx *sql.Tx) error {
+	result, err := tx.ExecContext(ctx,
+		`UPDATE gobus_metadata SET 
+            version = version + 1, 
+            updated_at = NOW(),
+            total_subscriptions = (SELECT COUNT(*) FROM gobus_subscriptions)`)
+	if err != nil {
+		return errors.Wrap(err, "failed to update metadata")
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get affected rows")
+	}
+
+	if rowsAffected != 1 {
+		return errors.New("failed to update metadata, no rows affected")
+	}
+
+	return nil
+}
+
 // Delete removes a subscription for the given queue and pattern.
-func (d *Dialect) Delete(ctx context.Context, queue, pattern string) error {
+func (d *Dialect) Delete(ctx context.Context, queue, pattern string) (xerr error) {
 	if strings.TrimSpace(queue) == "" {
 		return errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -276,7 +347,17 @@ func (d *Dialect) Delete(ctx context.Context, queue, pattern string) error {
 		return err
 	}
 
-	_, err := d.db.ExecContext(
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.Wrap(err, "failed to begin transaction")
+	}
+	defer func() {
+		if xerr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	_, err = tx.ExecContext(
 		ctx,
 		`DELETE FROM gobus_subscriptions 
          WHERE queue = $1 AND pattern = $2`,
@@ -284,6 +365,14 @@ func (d *Dialect) Delete(ctx context.Context, queue, pattern string) error {
 	)
 	if err != nil {
 		return errors.Wrap(err, "failed to delete subscription")
+	}
+
+	if err := d.updateMetadata(ctx, tx); err != nil {
+		return err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return errors.Wrap(err, "failed to commit transaction")
 	}
 
 	return nil

@@ -3,8 +3,17 @@ package bus
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/qor5/go-que"
+)
+
+type (
+	Metadata struct {
+		Version            int64
+		UpdatedAt          time.Time
+		TotalSubscriptions int64
+	}
 )
 
 // Dialect defines the interface for database-specific implementations of the message bus.
@@ -15,6 +24,9 @@ type Dialect interface {
 
 	// GoQue returns the underlying GoQue instance.
 	GoQue() que.Queue
+
+	// GetMetadata retrieves the current bus metadata.
+	GetMetadata(ctx context.Context) (*Metadata, error)
 
 	// BySubject finds all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)

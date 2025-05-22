@@ -42,6 +42,7 @@ func cleanupAllTables() {
 	// Safely drop tables, ignoring errors for non-existent tables
 	_, _ = db.Exec("DROP TABLE IF EXISTS goque_jobs CASCADE")
 	_, _ = db.Exec("DROP TABLE IF EXISTS gobus_subscriptions CASCADE")
+	_, _ = db.Exec("DROP TABLE IF EXISTS gobus_metadata CASCADE")
 }
 
 // Define multiple test queue names

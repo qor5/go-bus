@@ -264,6 +264,9 @@ func parsePatternTokens(pattern string) [bus.MaxPatternTokens]*string {
 		if i >= bus.MaxPatternTokens {
 			break
 		}
+
+		part := part
+
 		// Store the actual token value
 		tokens[i] = &part
 

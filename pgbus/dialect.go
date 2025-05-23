@@ -94,6 +94,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
         plan JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        ttl_seconds INTEGER NOT NULL DEFAULT 0, -- TTL in seconds, 0 means no expiration
+        heartbeat_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), -- Last heartbeat timestamp
         -- Pattern token columns for optimized indexed lookups
         token_0 VARCHAR(64),
         token_1 VARCHAR(64),
@@ -123,6 +125,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
         ON gobus_subscriptions (created_at);
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_updated_at_idx
         ON gobus_subscriptions (updated_at);
+        
+    -- Index for TTL cleanup - filter records with TTL enabled
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_ttl_cleanup_idx
+        ON gobus_subscriptions (ttl_seconds) WHERE ttl_seconds > 0;
         
     -- Optimized indexes for pattern token lookups
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_0_idx ON gobus_subscriptions (token_0);
@@ -189,7 +195,7 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 	for rows.Next() {
 		var sub subscription
 		var planData []byte
-
+		var heartbeatAt time.Time
 		if err := rows.Scan(
 			&sub.id,
 			&sub.queue,
@@ -198,6 +204,8 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 			&planData,
 			&sub.createdAt,
 			&sub.updatedAt,
+			&sub.ttlSeconds,
+			&heartbeatAt,
 			&sub.tokens[0],
 			&sub.tokens[1],
 			&sub.tokens[2],
@@ -282,11 +290,19 @@ func parsePatternTokens(pattern string) [bus.MaxPatternTokens]*string {
 	return tokens
 }
 
+const excludeExpired = "(ttl_seconds <= 0 OR EXTRACT(EPOCH FROM (NOW() - heartbeat_at)) <= ttl_seconds)"
+
 // buildSubscriptionQuery constructs the base SELECT query for subscriptions
-// with a customizable WHERE clause
+// with a customizable WHERE clause, excluding expired subscriptions
 func buildSubscriptionQuery(where string) string {
+	if where != "" {
+		where = fmt.Sprintf("(%s) AND %s", where, excludeExpired)
+	} else {
+		where = excludeExpired
+	}
 	return fmt.Sprintf(`
 		SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at,
+		       ttl_seconds, heartbeat_at,
 		       token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
 		       token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15
 		FROM gobus_subscriptions
@@ -396,7 +412,7 @@ func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) 
 }
 
 // Upsert creates or updates a subscription.
-func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig bus.PlanConfig) (_ bus.Subscription, xerr error) {
+func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.SubscribeOptions) (_ bus.Subscription, xerr error) {
 	if strings.TrimSpace(queue) == "" {
 		return nil, errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -406,13 +422,23 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		return nil, err
 	}
 
-	planData, err := json.Marshal(planConfig)
+	planData, err := json.Marshal(opts.PlanConfig)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to serialize subscription plan")
 	}
 
 	// Parse pattern into tokens for indexed lookup optimization
 	tokens := parsePatternTokens(pattern)
+
+	// Calculate TTL in seconds with validation
+	var ttlSeconds int64 = 0
+	if opts != nil && opts.TTL > 0 {
+		// Validate that TTL can be accurately represented in seconds
+		if opts.TTL%time.Second != 0 {
+			return nil, errors.New("TTL must be divisible by time.Second")
+		}
+		ttlSeconds = int64(opts.TTL.Seconds())
+	}
 
 	existingSub, err := d.byQueueAndPattern(ctx, queue, pattern)
 	if err != nil && !errors.Is(err, bus.ErrSubscriptionNotFound) {
@@ -424,8 +450,9 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		if existingSub.pattern == pattern &&
 			existingSub.queue == queue &&
 			existingSub.regexPattern == regexPattern &&
-			planConfig.Equal(existingSub.plan) &&
-			compareTokens(existingSub.tokens, tokens) {
+			opts.PlanConfig.Equal(existingSub.plan) &&
+			compareTokens(existingSub.tokens, tokens) &&
+			ttlSeconds == existingSub.ttlSeconds {
 			return existingSub, nil
 		}
 	}
@@ -444,14 +471,17 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		ctx,
 		`INSERT INTO gobus_subscriptions 
          (queue, pattern, regex_pattern, plan, created_at, updated_at,
+          ttl_seconds, heartbeat_at,
           token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
           token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15) 
-         VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+         VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
          ON CONFLICT (queue, pattern) 
          DO UPDATE SET 
             regex_pattern = EXCLUDED.regex_pattern,
             plan = EXCLUDED.plan,
             updated_at = NOW(),
+            ttl_seconds = EXCLUDED.ttl_seconds,
+            heartbeat_at = NOW(),
             token_0 = EXCLUDED.token_0,
             token_1 = EXCLUDED.token_1,
             token_2 = EXCLUDED.token_2,
@@ -469,9 +499,10 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
             token_14 = EXCLUDED.token_14,
             token_15 = EXCLUDED.token_15
 		RETURNING id, queue, pattern, regex_pattern, plan, created_at, updated_at,
+		          ttl_seconds, heartbeat_at,
 		          token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
 		          token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15`,
-		queue, pattern, regexPattern, planData,
+		queue, pattern, regexPattern, planData, ttlSeconds,
 		tokens[0], tokens[1], tokens[2], tokens[3],
 		tokens[4], tokens[5], tokens[6], tokens[7],
 		tokens[8], tokens[9], tokens[10], tokens[11],
@@ -525,8 +556,8 @@ func (d *Dialect) updateMetadata(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// Delete removes a subscription for the given queue and pattern.
-func (d *Dialect) Delete(ctx context.Context, queue, pattern string) (xerr error) {
+// delete removes a subscription for the given queue and pattern.
+func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error) {
 	if strings.TrimSpace(queue) == "" {
 		return errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -566,6 +597,76 @@ func (d *Dialect) Delete(ctx context.Context, queue, pattern string) (xerr error
 	return nil
 }
 
+// updateHeartbeat updates the heartbeat timestamp for a subscription.
+func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) error {
+	if strings.TrimSpace(queue) == "" {
+		return errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
+	}
+
+	if err := bus.ValidatePattern(pattern); err != nil {
+		return err
+	}
+
+	result, err := d.db.ExecContext(ctx,
+		`UPDATE gobus_subscriptions 
+         SET heartbeat_at = NOW() 
+         WHERE queue = $1 AND pattern = $2 AND `+excludeExpired,
+		queue, pattern)
+	if err != nil {
+		return errors.Wrap(err, "failed to update heartbeat")
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get affected rows")
+	}
+
+	if rowsAffected == 0 {
+		return errors.Wrap(bus.ErrSubscriptionNotFound, "subscription not found or expired")
+	}
+
+	return nil
+}
+
+// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
+// Returns the number of subscriptions that were cleaned up.
+func (d *Dialect) CleanupExpiredSubscriptions(ctx context.Context) (_ int64, xerr error) {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to begin transaction")
+	}
+	defer func() {
+		if xerr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	result, err := tx.ExecContext(ctx,
+		`DELETE FROM gobus_subscriptions 
+         WHERE ttl_seconds > 0 
+           AND EXTRACT(EPOCH FROM (NOW() - heartbeat_at)) > ttl_seconds`)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to cleanup expired subscriptions")
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to get affected rows")
+	}
+
+	if rowsAffected > 0 {
+		if err := d.updateMetadata(ctx, tx); err != nil {
+			return 0, err
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, errors.Wrap(err, "failed to commit transaction")
+	}
+
+	return rowsAffected, nil
+}
+
 var _ bus.Subscription = (*subscription)(nil)
 
 // subscription is an implementation of the Subscription interface.
@@ -578,6 +679,7 @@ type subscription struct {
 	plan         bus.PlanConfig
 	createdAt    time.Time
 	updatedAt    time.Time
+	ttlSeconds   int64                         // TTL in seconds, 0 means no expiration
 	tokens       [bus.MaxPatternTokens]*string // Parsed tokens for this subscription
 }
 
@@ -603,5 +705,10 @@ func (s *subscription) PlanConfig() bus.PlanConfig {
 
 // Unsubscribe removes this subscription.
 func (s *subscription) Unsubscribe(ctx context.Context) error {
-	return s.d.Delete(ctx, s.queue, s.pattern)
+	return s.d.delete(ctx, s.queue, s.pattern)
+}
+
+// Heartbeat updates the heartbeat timestamp for this subscription.
+func (s *subscription) Heartbeat(ctx context.Context) error {
+	return s.d.updateHeartbeat(ctx, s.queue, s.pattern)
 }

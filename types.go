@@ -16,7 +16,7 @@ import (
 	"github.com/qor5/go-que"
 )
 
-// Subscription represents an active subscription that can be unsubscribed.
+// Subscription represents an active subscription to a subject pattern.
 type Subscription interface {
 	// ID returns the unique identifier of the subscription.
 	ID() int64
@@ -27,13 +27,17 @@ type Subscription interface {
 	// Pattern returns the subject pattern this subscription matches against.
 	Pattern() string
 
-	// PlanConfig returns the configuration plan for this subscription.
+	// PlanConfig returns the plan configuration for this subscription.
 	PlanConfig() PlanConfig
 
 	// Unsubscribe removes this subscription.
 	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
 	// This is because go-bus is designed to support offline messages.
 	Unsubscribe(ctx context.Context) error
+
+	// Heartbeat updates the heartbeat timestamp for this subscription.
+	// This method should be called periodically to prevent TTL-based cleanup.
+	Heartbeat(ctx context.Context) error
 }
 
 type Header = http.Header
@@ -108,4 +112,8 @@ type Bus interface {
 
 	// BySubject returns all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)
+
+	// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
+	// Returns the number of subscriptions that were cleaned up.
+	CleanupExpiredSubscriptions(ctx context.Context) (int64, error)
 }

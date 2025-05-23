@@ -34,11 +34,11 @@ type Dialect interface {
 	// ByQueue returns all subscriptions for a specific queue.
 	ByQueue(ctx context.Context, queue string) ([]Subscription, error)
 
-	// Upsert creates or updates a subscription.
-	Upsert(ctx context.Context, queue, pattern string, planConfig PlanConfig) (Subscription, error)
+	// Upsert creates or updates a subscription with the provided options.
+	Upsert(ctx context.Context, queue, pattern string, opts *SubscribeOptions) (Subscription, error)
 
-	// Delete removes a subscription.
-	Delete(ctx context.Context, queue, pattern string) error
+	// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
+	CleanupExpiredSubscriptions(ctx context.Context) (int64, error)
 
 	// BeginTx starts a transaction.
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)

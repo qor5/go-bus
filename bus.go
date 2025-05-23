@@ -29,7 +29,7 @@ func (q *QueueImpl) Subscribe(ctx context.Context, pattern string, opts ...Subsc
 		opt(subscribeOpts)
 	}
 
-	sub, err := q.b.dialect.Upsert(ctx, q.name, pattern, subscribeOpts.PlanConfig)
+	sub, err := q.b.dialect.Upsert(ctx, q.name, pattern, subscribeOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -340,4 +340,9 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 // BySubject returns all subscriptions with patterns matching the given subject.
 func (b *BusImpl) BySubject(ctx context.Context, subject string) ([]Subscription, error) {
 	return b.dialect.BySubject(ctx, subject)
+}
+
+// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
+func (b *BusImpl) CleanupExpiredSubscriptions(ctx context.Context) (int64, error) {
+	return b.dialect.CleanupExpiredSubscriptions(ctx)
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/pkg/errors"
+	"github.com/rs/xid"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -22,15 +23,16 @@ var DefaultRistrettoConfigFactory = func() *ristretto.Config[string, []Subscript
 }
 
 type ristrettoCache struct {
+	scope string
 	cache *ristretto.Cache[string, []Subscription]
 }
 
 func (c *ristrettoCache) Get(key string) (value []Subscription, ok bool) {
-	return c.cache.Get(key)
+	return c.cache.Get(c.scope + ":" + key)
 }
 
 func (c *ristrettoCache) Set(key string, value []Subscription) {
-	if c.cache.Set(key, value, 0) {
+	if c.cache.Set(c.scope+":"+key, value, 0) {
 		c.cache.Wait()
 	}
 }
@@ -57,6 +59,7 @@ func RistrettoDecorator(cache *ristretto.Cache[string, []Subscription]) DialectD
 		panic("cache instance cannot be nil")
 	}
 	return CacheDecorator(&ristrettoCache{
+		scope: xid.New().String(),
 		cache: cache,
 	})
 }
@@ -68,6 +71,7 @@ type Cache interface {
 	Clear()
 }
 
+// TODO: 这个和 ttl 机制貌似相冲突，怎么应对呢？貌似 Subscription 还是可以反馈 ExpiresAt ，然后如果 cache 里的过期了就需要主动去查，否则不用重查
 // CacheDecorator creates a decorator that adds caching functionality to the dialect.
 // This significantly improves performance for subscription lookups.
 // The caller is responsible for creating and closing the cache instance.

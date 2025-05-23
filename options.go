@@ -112,16 +112,29 @@ func WithWorkerConfig(config WorkerConfig) ConsumeOption {
 // SubscribeOption represents an option for customizing a subscription.
 type SubscribeOption func(*SubscribeOptions)
 
-// SubscribeOptions holds all the options for creating a subscription.
+// SubscribeOptions contains the configuration for a subscription.
 type SubscribeOptions struct {
 	// PlanConfig contains the settings for job execution.
 	PlanConfig PlanConfig
+
+	// TTL specifies how long the subscription should remain active without heartbeat.
+	// If set to zero or negative value, the subscription will never expire.
+	TTL time.Duration
 }
 
 // WithPlanConfig sets the job configuration for a subscription.
 func WithPlanConfig(config PlanConfig) SubscribeOption {
 	return func(opts *SubscribeOptions) {
 		opts.PlanConfig = config
+	}
+}
+
+// WithTTL sets the TTL (Time To Live) for a subscription.
+// The subscription will be automatically cleaned up if no heartbeat
+// is received within this duration.
+func WithTTL(ttl time.Duration) SubscribeOption {
+	return func(o *SubscribeOptions) {
+		o.TTL = ttl
 	}
 }
 

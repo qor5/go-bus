@@ -7,6 +7,9 @@ import (
 	"github.com/pkg/errors"
 )
 
+// MaxPatternTokens defines the maximum number of tokens allowed in a pattern
+const MaxPatternTokens = 16
+
 // reValidSubjectChars is a regex that matches valid characters for subjects.
 var reValidSubjectChars = regexp.MustCompile(`^[a-z0-9_\-.]+$`)
 
@@ -26,6 +29,9 @@ func ValidateSubject(subject string) error {
 	}
 
 	tokens := strings.Split(subject, ".")
+	if len(tokens) > MaxPatternTokens {
+		return errors.Wrapf(ErrInvalidSubject, "subject cannot have more than %d tokens, got %d", MaxPatternTokens, len(tokens))
+	}
 	for _, token := range tokens {
 		if token == "" {
 			return errors.Wrap(ErrInvalidSubject, "subject contains empty tokens")
@@ -38,16 +44,23 @@ func ValidateSubject(subject string) error {
 // ValidatePattern validates that a pattern follows NATS wildcard rules.
 // It checks for:
 //   - Empty patterns are not allowed
-//   - Empty tokens (segments between dots) are not allowed
+//   - Empty tokens (parts between dots) are not allowed
 //   - Only lowercase alphanumeric characters, '_', and '-' are allowed in non-wildcard tokens
 //   - Wildcards can be '*' (single token) or '>' (multiple tokens)
 //   - The '>' wildcard can only appear at the end of a pattern
+//   - Pattern cannot exceed MaxPatternTokens tokens
 func ValidatePattern(pattern string) error {
 	if pattern == "" {
 		return errors.Wrap(ErrInvalidPattern, "pattern cannot be empty")
 	}
 
 	tokens := strings.Split(pattern, ".")
+
+	// Check token count limit
+	if len(tokens) > MaxPatternTokens {
+		return errors.Wrapf(ErrInvalidPattern, "pattern cannot have more than %d tokens, got %d", MaxPatternTokens, len(tokens))
+	}
+
 	for i, token := range tokens {
 		switch token {
 		case "":

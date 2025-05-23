@@ -20,7 +20,7 @@ func setupBenchmarkTestData(b *testing.B, ctx context.Context, busSvc bus.Bus) {
 		patterns := []string{
 			fmt.Sprintf("benchmark.subject.%d.event.>", i),        // Multi-level wildcard for events
 			fmt.Sprintf("benchmark.subject.%d.notification.*", i), // Single level wildcard for notifications
-			fmt.Sprintf("benchmark.*.%d.status", i),               // Wildcard in middle segment
+			fmt.Sprintf("benchmark.*.%d.status", i),               // Wildcard in middle token
 		}
 
 		for _, pattern := range patterns {

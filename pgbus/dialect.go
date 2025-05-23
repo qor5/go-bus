@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"strings"
 	"time"
@@ -14,13 +15,22 @@ import (
 	"github.com/qor5/go-que/pg"
 )
 
+// QueryStrategy defines the query strategy for BySubject operations
+type QueryStrategy string
+
+const (
+	QueryStrategyIndexed QueryStrategy = "INDEXED" // Use indexed lookup optimization
+	QueryStrategyRegex   QueryStrategy = "REGEX"   // Use regex-based query
+)
+
 var _ bus.Dialect = (*Dialect)(nil)
 
 // Dialect is a PostgreSQL-specific implementation of the bus.Dialect interface.
 // It provides database operations for the message bus using PostgreSQL.
 type Dialect struct {
-	db  *sql.DB
-	goq que.Queue
+	db            *sql.DB
+	goq           que.Queue
+	queryStrategy QueryStrategy
 }
 
 // NewDialect creates a new PostgreSQL-specific implementation of the bus.Dialect interface.
@@ -31,9 +41,16 @@ func NewDialect(db *sql.DB) (*Dialect, error) {
 		return nil, errors.Wrap(err, "failed to create GoQue instance")
 	}
 	return &Dialect{
-		db:  db,
-		goq: goq,
+		db:            db,
+		goq:           goq,
+		queryStrategy: QueryStrategyIndexed, // Default to indexed strategy
 	}, nil
+}
+
+// WithQueryStrategy sets the query strategy for BySubject operations
+func (d *Dialect) WithQueryStrategy(strategy QueryStrategy) *Dialect {
+	d.queryStrategy = strategy
+	return d
 }
 
 // GoQue returns the underlying GoQue instance.
@@ -77,6 +94,23 @@ func Migrate(ctx context.Context, db *sql.DB) error {
         plan JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        -- Pattern token columns for optimized indexed lookups
+        token_0 VARCHAR(64),
+        token_1 VARCHAR(64),
+        token_2 VARCHAR(64),
+        token_3 VARCHAR(64),
+        token_4 VARCHAR(64),
+        token_5 VARCHAR(64),
+        token_6 VARCHAR(64),
+        token_7 VARCHAR(64),
+        token_8 VARCHAR(64),
+        token_9 VARCHAR(64),
+        token_10 VARCHAR(64),
+        token_11 VARCHAR(64),
+        token_12 VARCHAR(64),
+        token_13 VARCHAR(64),
+        token_14 VARCHAR(64),
+        token_15 VARCHAR(64),
         UNIQUE (queue, pattern)
     );
     
@@ -89,6 +123,24 @@ func Migrate(ctx context.Context, db *sql.DB) error {
         ON gobus_subscriptions (created_at);
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_updated_at_idx
         ON gobus_subscriptions (updated_at);
+        
+    -- Optimized indexes for pattern token lookups
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_0_idx ON gobus_subscriptions (token_0);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_1_idx ON gobus_subscriptions (token_1);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_2_idx ON gobus_subscriptions (token_2);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_3_idx ON gobus_subscriptions (token_3);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_4_idx ON gobus_subscriptions (token_4);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_5_idx ON gobus_subscriptions (token_5);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_6_idx ON gobus_subscriptions (token_6);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_7_idx ON gobus_subscriptions (token_7);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_8_idx ON gobus_subscriptions (token_8);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_9_idx ON gobus_subscriptions (token_9);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_10_idx ON gobus_subscriptions (token_10);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_11_idx ON gobus_subscriptions (token_11);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_12_idx ON gobus_subscriptions (token_12);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_13_idx ON gobus_subscriptions (token_13);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_14_idx ON gobus_subscriptions (token_14);
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_15_idx ON gobus_subscriptions (token_15);
         
     CREATE TABLE IF NOT EXISTS gobus_metadata (
         version BIGINT NOT NULL DEFAULT 1,
@@ -104,6 +156,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errors.Wrap(err, "failed to create subscriptions table and indexes")
 		}
+
 		return nil
 	}
 	for attempts := 0; attempts < MaxMigrationAttempts; attempts++ {
@@ -130,7 +183,7 @@ func (d *Dialect) Migrate(ctx context.Context) error {
 	return Migrate(ctx, d.db)
 }
 
-// scanSubscriptionsInternal scans rows and converts them to subscription objects
+// scanSubscriptions scans rows and converts them to subscription objects
 func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) {
 	var subscriptions []bus.Subscription
 	for rows.Next() {
@@ -145,6 +198,22 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 			&planData,
 			&sub.createdAt,
 			&sub.updatedAt,
+			&sub.tokens[0],
+			&sub.tokens[1],
+			&sub.tokens[2],
+			&sub.tokens[3],
+			&sub.tokens[4],
+			&sub.tokens[5],
+			&sub.tokens[6],
+			&sub.tokens[7],
+			&sub.tokens[8],
+			&sub.tokens[9],
+			&sub.tokens[10],
+			&sub.tokens[11],
+			&sub.tokens[12],
+			&sub.tokens[13],
+			&sub.tokens[14],
+			&sub.tokens[15],
 		); err != nil {
 			return nil, errors.Wrap(err, "failed to scan subscription")
 		}
@@ -165,22 +234,122 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 	return subscriptions, nil
 }
 
+// compareTokens compares two token arrays for equality
+func compareTokens(a, b [bus.MaxPatternTokens]*string) bool {
+	for i := 0; i < bus.MaxPatternTokens; i++ {
+		// Both nil
+		if a[i] == nil && b[i] == nil {
+			continue
+		}
+		// One nil, one not nil
+		if (a[i] == nil) != (b[i] == nil) {
+			return false
+		}
+		// Both not nil, compare values
+		if *a[i] != *b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// parsePatternTokens splits a pattern into tokens for indexed lookup optimization
+// When encountering ">", it fills all subsequent positions with ">" to enable
+// precise matching without regex validation
+func parsePatternTokens(pattern string) [bus.MaxPatternTokens]*string {
+	var tokens [bus.MaxPatternTokens]*string
+	parts := strings.Split(pattern, ".")
+
+	for i, part := range parts {
+		if i >= bus.MaxPatternTokens {
+			break
+		}
+		// Store the actual token value
+		tokens[i] = &part
+
+		// If this token is ">", fill all remaining positions with ">"
+		if part == ">" {
+			for j := i + 1; j < bus.MaxPatternTokens; j++ {
+				tokens[j] = &part
+			}
+			break
+		}
+	}
+
+	return tokens
+}
+
+// buildSubscriptionQuery constructs the base SELECT query for subscriptions
+// with a customizable WHERE clause
+func buildSubscriptionQuery(where string) string {
+	return fmt.Sprintf(`
+		SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at,
+		       token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
+		       token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15
+		FROM gobus_subscriptions
+		WHERE %s
+		ORDER BY id ASC`,
+		where)
+}
+
+// buildIndexedWhereClause constructs WHERE clause and arguments for indexed query optimization
+func buildIndexedWhereClause(subject string) (string, []any) {
+	subjectParts := strings.Split(subject, ".")
+	subjectLen := len(subjectParts)
+
+	var conditions []string
+	var args []any
+	argIndex := 1
+
+	// Only need to check up to subjectLen + 1 positions
+	// since pattern boundary validation is handled at subjectLen + 1
+	var previousColName string
+	for i := 0; i < min(subjectLen+1, bus.MaxPatternTokens); i++ {
+		colName := fmt.Sprintf("token_%d", i)
+
+		if i < subjectLen {
+			// For positions within subject length: exact match OR "*" OR ">"
+			part := subjectParts[i]
+			condition := fmt.Sprintf("(%s = $%d OR %s = '*' OR %s = '>')",
+				colName, argIndex, colName, colName)
+			conditions = append(conditions, condition)
+			args = append(args, part)
+			argIndex++
+		} else if i == subjectLen {
+			// For position immediately after subject: current position must be NULL (pattern doesn't extend beyond subject)
+			// OR previous position must be ">" (multi-level wildcard can match remaining tokens)
+			condition := fmt.Sprintf("(%s IS NULL OR %s = '>')", colName, previousColName)
+			conditions = append(conditions, condition)
+		}
+		previousColName = colName
+	}
+
+	return strings.Join(conditions, " AND "), args
+}
+
 // BySubject finds all subscriptions that match the given subject.
 func (d *Dialect) BySubject(ctx context.Context, subject string) ([]bus.Subscription, error) {
 	if err := bus.ValidateSubject(subject); err != nil {
 		return nil, err
 	}
 
-	rows, err := d.db.QueryContext(
-		ctx,
-		`SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at
-		 FROM gobus_subscriptions
-		 WHERE $1 ~ regex_pattern
-		 ORDER BY id ASC`,
-		subject,
-	)
+	var where string
+	var args []any
+
+	switch d.queryStrategy {
+	case QueryStrategyRegex:
+		where = "$1 ~ regex_pattern"
+		args = []any{subject}
+	case QueryStrategyIndexed:
+		where, args = buildIndexedWhereClause(subject)
+	default:
+		return nil, errors.New("unknown query strategy")
+	}
+
+	query := buildSubscriptionQuery(where)
+	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to query subscriptions")
+		return nil, errors.Wrapf(err, "failed to query subscriptions with strategy %s", d.queryStrategy)
 	}
 	defer rows.Close()
 
@@ -193,14 +362,8 @@ func (d *Dialect) ByQueue(ctx context.Context, queue string) ([]bus.Subscription
 		return nil, errors.Wrap(bus.ErrInvalidQueue, "queue cannot be empty")
 	}
 
-	rows, err := d.db.QueryContext(
-		ctx,
-		`SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at
-         FROM gobus_subscriptions
-         WHERE queue = $1
-         ORDER BY id ASC`,
-		queue,
-	)
+	query := buildSubscriptionQuery("queue = $1")
+	rows, err := d.db.QueryContext(ctx, query, queue)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to query subscriptions")
 	}
@@ -210,14 +373,8 @@ func (d *Dialect) ByQueue(ctx context.Context, queue string) ([]bus.Subscription
 }
 
 func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) (*subscription, error) {
-	rows, err := d.db.QueryContext(
-		ctx,
-		`SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at
-         FROM gobus_subscriptions
-         WHERE queue = $1 AND pattern = $2
-         ORDER BY id ASC`,
-		queue, pattern,
-	)
+	query := buildSubscriptionQuery("queue = $1 AND pattern = $2")
+	rows, err := d.db.QueryContext(ctx, query, queue, pattern)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to query subscription")
 	}
@@ -251,6 +408,9 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		return nil, errors.Wrap(err, "failed to serialize subscription plan")
 	}
 
+	// Parse pattern into tokens for indexed lookup optimization
+	tokens := parsePatternTokens(pattern)
+
 	existingSub, err := d.byQueueAndPattern(ctx, queue, pattern)
 	if err != nil && !errors.Is(err, bus.ErrSubscriptionNotFound) {
 		return nil, err
@@ -261,7 +421,8 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 		if existingSub.pattern == pattern &&
 			existingSub.queue == queue &&
 			existingSub.regexPattern == regexPattern &&
-			planConfig.Equal(existingSub.plan) {
+			planConfig.Equal(existingSub.plan) &&
+			compareTokens(existingSub.tokens, tokens) {
 			return existingSub, nil
 		}
 	}
@@ -279,15 +440,39 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, planConfig 
 	rows, err := tx.QueryContext(
 		ctx,
 		`INSERT INTO gobus_subscriptions 
-         (queue, pattern, regex_pattern, plan, created_at, updated_at) 
-         VALUES ($1, $2, $3, $4, NOW(), NOW())
+         (queue, pattern, regex_pattern, plan, created_at, updated_at,
+          token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
+          token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15) 
+         VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          ON CONFLICT (queue, pattern) 
          DO UPDATE SET 
             regex_pattern = EXCLUDED.regex_pattern,
             plan = EXCLUDED.plan,
-            updated_at = NOW()
-		RETURNING id, queue, pattern, regex_pattern, plan, created_at, updated_at`,
+            updated_at = NOW(),
+            token_0 = EXCLUDED.token_0,
+            token_1 = EXCLUDED.token_1,
+            token_2 = EXCLUDED.token_2,
+            token_3 = EXCLUDED.token_3,
+            token_4 = EXCLUDED.token_4,
+            token_5 = EXCLUDED.token_5,
+            token_6 = EXCLUDED.token_6,
+            token_7 = EXCLUDED.token_7,
+            token_8 = EXCLUDED.token_8,
+            token_9 = EXCLUDED.token_9,
+            token_10 = EXCLUDED.token_10,
+            token_11 = EXCLUDED.token_11,
+            token_12 = EXCLUDED.token_12,
+            token_13 = EXCLUDED.token_13,
+            token_14 = EXCLUDED.token_14,
+            token_15 = EXCLUDED.token_15
+		RETURNING id, queue, pattern, regex_pattern, plan, created_at, updated_at,
+		          token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
+		          token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15`,
 		queue, pattern, regexPattern, planData,
+		tokens[0], tokens[1], tokens[2], tokens[3],
+		tokens[4], tokens[5], tokens[6], tokens[7],
+		tokens[8], tokens[9], tokens[10], tokens[11],
+		tokens[12], tokens[13], tokens[14], tokens[15],
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to insert or update subscription")
@@ -390,6 +575,7 @@ type subscription struct {
 	plan         bus.PlanConfig
 	createdAt    time.Time
 	updatedAt    time.Time
+	tokens       [bus.MaxPatternTokens]*string // Parsed tokens for this subscription
 }
 
 // ID returns the unique identifier of the subscription.

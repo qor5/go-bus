@@ -76,7 +76,7 @@ func TestToRegexPattern(t *testing.T) {
 				"foo.bar.1.2.3",
 			},
 			nonMatches: []string{
-				"foo.bar", // No trailing segment
+				"foo.bar", // No trailing token
 				"foo.baz.qux",
 			},
 		},
@@ -91,8 +91,8 @@ func TestToRegexPattern(t *testing.T) {
 				"foo.hi.baz.bye.xyz",
 			},
 			nonMatches: []string{
-				"foo.bar.baz", // No trailing segment for >
-				"foo.baz.qux", // Missing wildcard segment
+				"foo.bar.baz", // No trailing token for >
+				"foo.baz.qux", // Missing wildcard token
 			},
 		},
 		{
@@ -135,7 +135,7 @@ func TestToRegexPattern(t *testing.T) {
 				"a.foo.b.bar.c.baz.qux",
 			},
 			nonMatches: []string{
-				"a.1.b.2.c",   // No trailing segment for >
+				"a.1.b.2.c",   // No trailing token for >
 				"a.1.b.2.d.3", // Does not match 'c'
 				"a.1.b.2.c",   // No trailing token for >
 				"x.1.b.2.c.3", // Does not match 'a'
@@ -257,6 +257,14 @@ func TestToRegexPattern(t *testing.T) {
 			matches:          nil,
 			nonMatches:       nil,
 		},
+		{
+			name:             "pattern_exceeds_max_tokens",
+			pattern:          "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u",
+			expected:         "",
+			expectErrKeyword: "cannot have more than",
+			matches:          nil,
+			nonMatches:       nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -369,6 +377,11 @@ func TestValidateSubject(t *testing.T) {
 			name:             "subject_with_gt_wildcard",
 			subject:          "foo.>",
 			expectErrKeyword: "invalid characters",
+		},
+		{
+			name:             "pattern_exceeds_max_tokens",
+			subject:          "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u",
+			expectErrKeyword: "cannot have more than",
 		},
 	}
 

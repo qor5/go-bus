@@ -3,6 +3,7 @@ package bus_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -29,20 +30,30 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	// Ensure all potentially existing dependent tables are cleaned up before tests start
+	// Initialize database schema directly - Migrate handles tables that may already exist
+	ctx := context.Background()
+	if err := pgbus.Migrate(ctx, db); err != nil {
+		panic(fmt.Sprintf("Failed to migrate database: %v", err))
+	}
+
+	// Clear all data while preserving table structure
 	cleanupAllTables()
 
 	m.Run()
 }
 
-// cleanupAllTables safely drops all test-related tables with CASCADE option
-// to handle any dependencies. Errors are intentionally ignored as tables
-// might not exist during first run.
+// cleanupAllTables clears all data from tables without dropping table structure,
+// which improves test efficiency by avoiding repeated schema creation
 func cleanupAllTables() {
-	// Safely drop tables, ignoring errors for non-existent tables
-	_, _ = db.Exec("DROP TABLE IF EXISTS goque_jobs CASCADE")
-	_, _ = db.Exec("DROP TABLE IF EXISTS gobus_subscriptions CASCADE")
-	_, _ = db.Exec("DROP TABLE IF EXISTS gobus_metadata CASCADE")
+	// Clear data while preserving table structure
+	_, _ = db.Exec("DELETE FROM goque_jobs")
+	_, _ = db.Exec("DELETE FROM gobus_subscriptions")
+	_, _ = db.Exec("DELETE FROM gobus_metadata")
+
+	// Restore initial metadata record to ensure consistent test environment
+	_, _ = db.Exec("INSERT INTO gobus_metadata (version, updated_at, total_subscriptions) " +
+		"SELECT 1, NOW(), 0 " +
+		"WHERE NOT EXISTS (SELECT 1 FROM gobus_metadata)")
 }
 
 // Define multiple test queue names

@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupTestData(b *testing.B, ctx context.Context, busSvc bus.Bus) {
+func setupBenchmarkTestData(b *testing.B, ctx context.Context, busSvc bus.Bus) {
 	// Create a series of test subscriptions
 	for i := 0; i < 10; i++ {
 		queueName := fmt.Sprintf("benchmark-queue-%d", i)
@@ -32,14 +32,6 @@ func setupTestData(b *testing.B, ctx context.Context, busSvc bus.Bus) {
 	}
 }
 
-func cleanupTestData(b *testing.B, ctx context.Context) {
-	// Clean up test data
-	_, err := db.ExecContext(ctx, "DELETE FROM gobus_subscriptions WHERE queue LIKE 'benchmark-queue-%'")
-	if err != nil {
-		b.Fatalf("failed to clean up subscription data: %v", err)
-	}
-}
-
 // Common benchmark subjects - simulating normal topic distribution
 var benchmarkSubjects = []string{
 	"benchmark.subject.1.event.created",
@@ -58,14 +50,14 @@ var benchmarkSubjects = []string{
 func prepareBenchmark(b *testing.B) (context.Context, bus.Bus, bus.Bus) {
 	ctx := context.Background()
 
-	// Bus without cache - ensure migration is executed
-	noCacheBus, err := pgbus.New(db, bus.WithMigrate(true))
+	// Clean up test data
+	cleanupAllTables()
+
+	// Bus without cache
+	noCacheBus, err := pgbus.New(db, bus.WithMigrate(false))
 	if err != nil {
 		b.Fatalf("failed to create bus without cache: %v", err)
 	}
-
-	// Clean up test data
-	cleanupTestData(b, ctx)
 
 	// Bus with cache - migration already done, no need to repeat
 	cache, err := bus.NewRistrettoCache(nil)
@@ -80,45 +72,15 @@ func prepareBenchmark(b *testing.B) (context.Context, bus.Bus, bus.Bus) {
 	}
 
 	// Set up test data
-	setupTestData(b, ctx, noCacheBus)
+	setupBenchmarkTestData(b, ctx, noCacheBus)
 
 	// Clean up data after test
 	b.Cleanup(func() {
-		cleanupTestData(b, ctx)
+		cleanupAllTables()
 		cache.Close()
 	})
 
 	return ctx, noCacheBus, cacheBus
-}
-
-// BenchmarkWithoutCache tests performance without cache
-func BenchmarkWithoutCache(b *testing.B) {
-	ctx, noCacheBus, _ := prepareBenchmark(b)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		// Use different subjects to simulate real queries
-		subject := benchmarkSubjects[i%len(benchmarkSubjects)]
-		_, err := noCacheBus.BySubject(ctx, subject)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkWithCache tests performance with cache
-func BenchmarkWithCache(b *testing.B) {
-	ctx, _, cacheBus := prepareBenchmark(b)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		// Use different subjects to simulate real queries
-		subject := benchmarkSubjects[i%len(benchmarkSubjects)]
-		_, err := cacheBus.BySubject(ctx, subject)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
 }
 
 // BenchmarkWithCacheRepeatedSubject tests cache performance when repeatedly querying the same subject
@@ -231,8 +193,131 @@ func BenchmarkSubscriptionChange(b *testing.B) {
 	})
 
 	// Clean up additionally created temporary subscriptions
-	_, err := db.ExecContext(ctx, "DELETE FROM gobus_subscriptions WHERE queue LIKE 'benchmark-queue-temp-%'")
+}
+
+// setupSubscriptionsWithScale creates a specific number of test subscriptions
+func setupSubscriptionsWithScale(b *testing.B, ctx context.Context, busSvc bus.Bus, scale int) {
+	// Create a series of test subscriptions based on scale
+	for i := 0; i < scale; i++ {
+		queueName := fmt.Sprintf("benchmark-queue-scale-%d", i)
+		queue := busSvc.Queue(queueName)
+
+		// Create subscription patterns with distinct matching behaviors
+		patterns := []string{
+			fmt.Sprintf("benchmark.scale.%d.event.>", i),        // Multi-level wildcard
+			fmt.Sprintf("benchmark.scale.%d.notification.*", i), // Single level wildcard
+		}
+
+		for _, pattern := range patterns {
+			_, err := queue.Subscribe(ctx, pattern)
+			if err != nil {
+				b.Fatalf("failed to create subscription: %v", err)
+			}
+		}
+	}
+}
+
+// BenchmarkDialectBySubject tests the performance of the underlying Dialect.BySubject method
+func BenchmarkDialectBySubject(b *testing.B) {
+	// Create dialect directly
+	dialect, err := pgbus.NewDialect(db)
 	if err != nil {
-		b.Fatalf("failed to clean up temporary subscription data: %v", err)
+		b.Fatalf("failed to create dialect: %v", err)
+	}
+
+	// Define test scales (number of subscriptions to create)
+	scales := []struct {
+		name  string
+		count int
+	}{
+		{"Small_10", 5},     // 10 subscriptions (5 queues × 2 patterns)
+		{"Medium_100", 50},  // 100 subscriptions (50 queues × 2 patterns)
+		{"Large_1000", 500}, // 1000 subscriptions (500 queues × 2 patterns)
+	}
+
+	// Define subjects to test
+	testSubjects := []struct {
+		name    string
+		subject string
+		scale   int // Which scale this subject is targeting (defaults to first if 0)
+	}{
+		{"ExactMatch", "benchmark.scale.1.event.created", 0},
+		{"WildcardMatch", "benchmark.scale.5.notification.sent", 0},
+		{"NoMatch", "benchmark.no.match.subject", 0},
+		{"DeepMatch", "benchmark.scale.42.event.deeply.nested.path", 0},
+	}
+
+	// Test both cached and non-cached scenarios
+	cacheScenarios := []struct {
+		name     string
+		useCache bool
+	}{
+		{"WithoutCache", false},
+		{"WithCache", true},
+	}
+
+	for _, cacheScenario := range cacheScenarios {
+		b.Run(cacheScenario.name, func(b *testing.B) {
+			// Create appropriate bus based on cache scenario
+			var testBus bus.Bus
+
+			if cacheScenario.useCache {
+				cache, err := bus.NewRistrettoCache(nil)
+				if err != nil {
+					b.Fatalf("failed to create cache: %v", err)
+				}
+				defer cache.Close()
+
+				testBus, err = pgbus.New(db,
+					bus.WithMigrate(false),
+					bus.WithDialectDecorator(bus.RistrettoDecorator(cache)),
+				)
+				if err != nil {
+					b.Fatalf("failed to create cached bus: %v", err)
+				}
+			} else {
+				var err error
+				testBus, err = pgbus.New(db, bus.WithMigrate(false))
+				if err != nil {
+					b.Fatalf("failed to create bus: %v", err)
+				}
+			}
+
+			for _, scale := range scales {
+				b.Run(scale.name, func(b *testing.B) {
+					// Clean up prior subscriptions
+					cleanupAllTables()
+
+					ctx := context.Background()
+
+					// Setup subscriptions for this scale
+					setupSubscriptionsWithScale(b, ctx, testBus, scale.count)
+
+					for _, subject := range testSubjects {
+						// If subject has specific scale requirement, skip if not matching
+						if subject.scale > 0 && subject.scale != scale.count {
+							continue
+						}
+
+						b.Run(subject.name, func(b *testing.B) {
+							b.ResetTimer()
+							for i := 0; i < b.N; i++ {
+								if cacheScenario.useCache {
+									_, err := testBus.BySubject(ctx, subject.subject)
+									if err != nil {
+										b.Fatal(err)
+									}
+								} else {
+									_, err := dialect.BySubject(ctx, subject.subject)
+									if err != nil {
+										b.Fatal(err)
+									}
+								}
+							}
+						})
+					}
+				})
+			}
+		})
 	}
 }

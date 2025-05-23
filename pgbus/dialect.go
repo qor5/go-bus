@@ -98,7 +98,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
     
     -- Insert initial metadata row if it doesn't exist
     INSERT INTO gobus_metadata (version, updated_at, total_subscriptions)
-    SELECT 1, NOW(), (SELECT COUNT(*) FROM gobus_subscriptions)
+    SELECT 1, NOW(), (SELECT COUNT(1) FROM gobus_subscriptions)
     WHERE NOT EXISTS (SELECT 1 FROM gobus_metadata);
     `)
 		if err != nil {
@@ -320,7 +320,7 @@ func (d *Dialect) updateMetadata(ctx context.Context, tx *sql.Tx) error {
 		`UPDATE gobus_metadata SET 
             version = version + 1, 
             updated_at = NOW(),
-            total_subscriptions = (SELECT COUNT(*) FROM gobus_subscriptions)`)
+            total_subscriptions = (SELECT COUNT(1) FROM gobus_subscriptions)`)
 	if err != nil {
 		return errors.Wrap(err, "failed to update metadata")
 	}

@@ -191,8 +191,8 @@ func TestQueryStrategy(t *testing.T) {
 	assert.Equal(t, QueryStrategyIndexed, dialect.queryStrategy)
 
 	// Test WithQueryStrategy
-	dialect = dialect.WithQueryStrategy(QueryStrategyRegex)
-	assert.Equal(t, QueryStrategyRegex, dialect.queryStrategy)
+	dialect = dialect.WithQueryStrategy(QueryStrategyRegexp)
+	assert.Equal(t, QueryStrategyRegexp, dialect.queryStrategy)
 
 	// Test chaining
 	dialect = dialect.WithQueryStrategy(QueryStrategyIndexed)

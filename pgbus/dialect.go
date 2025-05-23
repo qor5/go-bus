@@ -20,7 +20,7 @@ type QueryStrategy string
 
 const (
 	QueryStrategyIndexed QueryStrategy = "INDEXED" // Use indexed lookup optimization
-	QueryStrategyRegex   QueryStrategy = "REGEX"   // Use regex-based query
+	QueryStrategyRegexp  QueryStrategy = "REGEXP"  // Use regexp-based query
 )
 
 var _ bus.Dialect = (*Dialect)(nil)
@@ -340,7 +340,7 @@ func (d *Dialect) BySubject(ctx context.Context, subject string) ([]bus.Subscrip
 	var args []any
 
 	switch d.queryStrategy {
-	case QueryStrategyRegex:
+	case QueryStrategyRegexp:
 		where = "$1 ~ regex_pattern"
 		args = []any{subject}
 	case QueryStrategyIndexed:

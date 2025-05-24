@@ -1591,9 +1591,9 @@ func TestTTLAndHeartbeat(t *testing.T) {
 	t.Run("TTL Subscription Creation", func(t *testing.T) {
 		queue := b.Queue("test-ttl-queue")
 
-		// Create subscription with 1-second TTL
+		// Create subscription with 200ms TTL
 		sub, err := queue.Subscribe(ctx, "test.ttl",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(200*time.Millisecond),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, sub)
@@ -1608,14 +1608,14 @@ func TestTTLAndHeartbeat(t *testing.T) {
 	t.Run("Heartbeat Updates Expiration", func(t *testing.T) {
 		queue := b.Queue("test-heartbeat-queue")
 
-		// Create subscription with 2-second TTL
+		// Create subscription with 300ms TTL
 		sub, err := queue.Subscribe(ctx, "test.heartbeat",
-			bus.WithTTL(2*time.Second),
+			bus.WithTTL(300*time.Millisecond),
 		)
 		require.NoError(t, err)
 
 		// Wait a bit and send heartbeat
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		err = sub.Heartbeat(ctx)
 		require.NoError(t, err)
 
@@ -1625,15 +1625,15 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		require.Len(t, subs, 1)
 		assert.Equal(t, "test.heartbeat", subs[0].Pattern())
 
-		// Wait 1 second (total elapsed ~1.5s from heartbeat, should still be valid since TTL is 2s)
-		time.Sleep(1 * time.Second)
+		// Wait 150ms (total elapsed ~250ms from heartbeat, should still be valid since TTL is 300ms)
+		time.Sleep(150 * time.Millisecond)
 
 		subs, err = queue.Subscriptions(ctx)
 		require.NoError(t, err)
 		assert.Len(t, subs, 1, "Subscription should still exist after heartbeat extended TTL")
 
-		// Now wait for actual expiration (wait another 1.5 seconds to ensure it expires)
-		time.Sleep(1500 * time.Millisecond)
+		// Now wait for actual expiration (wait another 200ms to ensure it expires)
+		time.Sleep(200 * time.Millisecond)
 
 		subs, err = queue.Subscriptions(ctx)
 		require.NoError(t, err)
@@ -1652,7 +1652,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 
 		// Create another subscription with TTL that will expire
 		_, err = queue.Subscribe(ctx, "test.will-expire",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1662,7 +1662,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		assert.Len(t, subs, 2, "Should initially see both subscriptions")
 
 		// Wait for TTL subscription to expire
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Verify expired subscription is now filtered from queries
 		subs, err = queue.Subscriptions(ctx)
@@ -1689,19 +1689,19 @@ func TestTTLAndHeartbeat(t *testing.T) {
 
 		queue := b.Queue("test-heartbeat-alive-queue")
 
-		// Create subscription with 2-second TTL
+		// Create subscription with 300ms TTL
 		sub, err := queue.Subscribe(ctx, "test.heartbeat-alive",
-			bus.WithTTL(2*time.Second),
+			bus.WithTTL(300*time.Millisecond),
 		)
 		require.NoError(t, err)
 
-		// Send heartbeat after 1 second (before expiration)
-		time.Sleep(1 * time.Second)
+		// Send heartbeat after 150ms (before expiration)
+		time.Sleep(150 * time.Millisecond)
 		err = sub.Heartbeat(ctx)
 		require.NoError(t, err)
 
-		// Wait another 1 second (total 2 seconds, but heartbeat extended TTL)
-		time.Sleep(1 * time.Second)
+		// Wait another 150ms (total 300ms, but heartbeat extended TTL)
+		time.Sleep(150 * time.Millisecond)
 
 		// Subscription should still exist
 		subs, err := queue.Subscriptions(ctx)
@@ -1709,7 +1709,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		assert.Len(t, subs, 1, "Subscription should still exist after heartbeat")
 
 		// Now wait for actual expiration without heartbeat
-		time.Sleep(2500 * time.Millisecond)
+		time.Sleep(350 * time.Millisecond)
 
 		// Verify subscription is now filtered from queries (expired)
 		subs, err = queue.Subscriptions(ctx)
@@ -1739,9 +1739,9 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 	queue := b.Queue("test-filtering-queue")
 
 	t.Run("BySubject Filters Expired Subscriptions", func(t *testing.T) {
-		// Create subscription with 1-second TTL
+		// Create subscription with 150ms TTL
 		_, err := queue.Subscribe(ctx, "test.expired",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1751,7 +1751,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		assert.Len(t, subs, 1, "Should find subscription before expiration")
 
 		// Wait for expiration
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Should not find the expired subscription
 		subs, err = b.BySubject(ctx, "test.expired")
@@ -1765,9 +1765,9 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		require.NoError(t, err)
 		queue := b.Queue("test-filtering-queue2")
 
-		// Create subscription with 1-second TTL
+		// Create subscription with 150ms TTL
 		_, err = queue.Subscribe(ctx, "test.queue-expired",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1777,7 +1777,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		assert.Len(t, subs, 1, "Should find subscription before expiration")
 
 		// Wait for expiration
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Should not find the expired subscription
 		subs, err = queue.Subscriptions(ctx)
@@ -1793,7 +1793,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 
 		// Create one subscription with TTL that will expire
 		_, err = queue.Subscribe(ctx, "test.will-expire",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1807,7 +1807,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		assert.Len(t, subs, 2, "Should find both subscriptions initially")
 
 		// Wait for first subscription to expire
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Should only find the permanent subscription
 		subs, err = queue.Subscriptions(ctx)
@@ -1828,14 +1828,14 @@ func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
 	queue := b.Queue("test-update-prevention-queue")
 
 	t.Run("Heartbeat Fails for Expired Subscription", func(t *testing.T) {
-		// Create subscription with 1-second TTL
+		// Create subscription with 150ms TTL
 		sub, err := queue.Subscribe(ctx, "test.expired-heartbeat",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
 		// Wait for subscription to expire
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Attempt to update heartbeat - should fail
 		err = sub.Heartbeat(ctx)
@@ -1851,7 +1851,7 @@ func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
 
 		// Create subscription with longer TTL
 		sub, err := queue.Subscribe(ctx, "test.valid-heartbeat",
-			bus.WithTTL(3*time.Second),
+			bus.WithTTL(500*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1860,7 +1860,7 @@ func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
 		assert.NoError(t, err, "Heartbeat should succeed for valid subscription")
 
 		// Wait a bit and try again
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		err = sub.Heartbeat(ctx)
 		assert.NoError(t, err, "Heartbeat should still succeed")
 	})
@@ -1877,16 +1877,16 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 	queue := b.Queue("test-upsert-revive-queue")
 
 	t.Run("Upsert Revives Expired Subscription", func(t *testing.T) {
-		// Create subscription with 1-second TTL
+		// Create subscription with 150ms TTL
 		sub1, err := queue.Subscribe(ctx, "test.upsert-revive",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
 		originalID := sub1.ID()
 
 		// Wait for subscription to expire
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Verify subscription is no longer visible in queries (filtered as expired)
 		subs, err := queue.Subscriptions(ctx)
@@ -1895,7 +1895,7 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 
 		// Now try to subscribe again with same pattern - should revive the expired subscription
 		sub2, err := queue.Subscribe(ctx, "test.upsert-revive",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1915,7 +1915,7 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 		assert.NoError(t, err, "Heartbeat should work on revived subscription")
 
 		// Wait for subscription to expire
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Heartbeat should fail for expired subscription
 		err = sub2.Heartbeat(ctx)
@@ -1928,7 +1928,7 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 		assert.Equal(t, int64(1), cleaned, "Should clean up expired subscription from database")
 
 		sub3, err := queue.Subscribe(ctx, "test.upsert-revive",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1957,9 +1957,9 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 
 		queue := cachedBus.Queue("test-cache-ttl-queue")
 
-		// Create subscription with 2-second TTL
+		// Create subscription with 300ms TTL
 		_, err = queue.Subscribe(ctx, "test.cache-ttl",
-			bus.WithTTL(2*time.Second),
+			bus.WithTTL(300*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -1991,9 +1991,9 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 
 		queue := cachedBus.Queue("test-cache-ttl-refresh-queue")
 
-		// Create subscription with very short TTL (1 second)
+		// Create subscription with very short TTL (150ms)
 		_, err = queue.Subscribe(ctx, "test.cache-refresh",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -2003,7 +2003,7 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 		assert.Len(t, subs1, 1, "Should find subscription initially")
 
 		// Wait for subscription to expire
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Second call - cache should detect expiration and refresh from database
 		// The database query should filter out expired subscriptions
@@ -2028,9 +2028,9 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 		_, err = queue.Subscribe(ctx, "test.cache-permanent")
 		require.NoError(t, err)
 
-		// Create TTL subscription that will expire soon (1 second)
+		// Create TTL subscription that will expire soon (150ms)
 		_, err = queue.Subscribe(ctx, "test.cache-expiring",
-			bus.WithTTL(1*time.Second),
+			bus.WithTTL(150*time.Millisecond),
 		)
 		require.NoError(t, err)
 
@@ -2051,7 +2051,7 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 		assert.False(t, subs2[0].ExpiresAt().IsZero(), "Expiring subscription should have expiration time")
 
 		// Wait for TTL subscription to expire
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		// Check permanent subscription is still there
 		subs3, err := cachedBus.BySubject(ctx, subject)
@@ -2078,7 +2078,7 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 
 		// Create subscription with long TTL (won't expire during test)
 		_, err = queue.Subscribe(ctx, "test.cache-long-ttl",
-			bus.WithTTL(10*time.Second),
+			bus.WithTTL(2*time.Second),
 		)
 		require.NoError(t, err)
 

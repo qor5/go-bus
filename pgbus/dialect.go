@@ -94,6 +94,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
         plan JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        deleted_at TIMESTAMP WITH TIME ZONE, -- Soft delete timestamp, NULL means not deleted
         ttl_milliseconds INTEGER NOT NULL DEFAULT 0, -- TTL in milliseconds, 0 means no expiration
         heartbeat_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), -- Last heartbeat timestamp
         -- Pattern token columns for optimized indexed lookups
@@ -112,41 +113,48 @@ func Migrate(ctx context.Context, db *sql.DB) error {
         token_12 VARCHAR(64),
         token_13 VARCHAR(64),
         token_14 VARCHAR(64),
-        token_15 VARCHAR(64),
-        UNIQUE (queue, pattern)
+        token_15 VARCHAR(64)
     );
     
-    -- Index for queue lookups
+    -- Partial unique constraint: only for non-deleted records
+    CREATE UNIQUE INDEX IF NOT EXISTS gobus_subscriptions_queue_pattern_idx 
+        ON gobus_subscriptions (queue, pattern) WHERE deleted_at IS NULL;
+    
+    -- Index for queue lookups (only for active subscriptions)
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_queue_idx 
-        ON gobus_subscriptions (queue);
+        ON gobus_subscriptions (queue) WHERE deleted_at IS NULL;
         
-    -- Index for created_at and updated_at
+    -- Index for soft delete status (no condition needed)
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_deleted_at_idx
+        ON gobus_subscriptions (deleted_at);
+        
+    -- Index for created_at and updated_at (no condition needed for management)
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_created_at_idx
         ON gobus_subscriptions (created_at);
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_updated_at_idx
         ON gobus_subscriptions (updated_at);
         
-    -- Index for TTL cleanup - filter records with TTL enabled
+    -- Index for TTL cleanup - filter records with TTL enabled and not deleted
     CREATE INDEX IF NOT EXISTS gobus_subscriptions_ttl_cleanup_idx
-        ON gobus_subscriptions (ttl_milliseconds) WHERE ttl_milliseconds > 0;
+        ON gobus_subscriptions (ttl_milliseconds) WHERE ttl_milliseconds > 0 AND deleted_at IS NULL;
         
-    -- Optimized indexes for pattern token lookups
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_0_idx ON gobus_subscriptions (token_0);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_1_idx ON gobus_subscriptions (token_1);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_2_idx ON gobus_subscriptions (token_2);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_3_idx ON gobus_subscriptions (token_3);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_4_idx ON gobus_subscriptions (token_4);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_5_idx ON gobus_subscriptions (token_5);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_6_idx ON gobus_subscriptions (token_6);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_7_idx ON gobus_subscriptions (token_7);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_8_idx ON gobus_subscriptions (token_8);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_9_idx ON gobus_subscriptions (token_9);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_10_idx ON gobus_subscriptions (token_10);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_11_idx ON gobus_subscriptions (token_11);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_12_idx ON gobus_subscriptions (token_12);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_13_idx ON gobus_subscriptions (token_13);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_14_idx ON gobus_subscriptions (token_14);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_15_idx ON gobus_subscriptions (token_15);
+    -- Optimized indexes for pattern token lookups (only active records)
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_0_idx ON gobus_subscriptions (token_0) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_1_idx ON gobus_subscriptions (token_1) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_2_idx ON gobus_subscriptions (token_2) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_3_idx ON gobus_subscriptions (token_3) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_4_idx ON gobus_subscriptions (token_4) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_5_idx ON gobus_subscriptions (token_5) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_6_idx ON gobus_subscriptions (token_6) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_7_idx ON gobus_subscriptions (token_7) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_8_idx ON gobus_subscriptions (token_8) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_9_idx ON gobus_subscriptions (token_9) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_10_idx ON gobus_subscriptions (token_10) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_11_idx ON gobus_subscriptions (token_11) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_12_idx ON gobus_subscriptions (token_12) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_13_idx ON gobus_subscriptions (token_13) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_14_idx ON gobus_subscriptions (token_14) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_15_idx ON gobus_subscriptions (token_15) WHERE deleted_at IS NULL;
         
     CREATE TABLE IF NOT EXISTS gobus_metadata (
         version BIGINT NOT NULL DEFAULT 1,
@@ -156,7 +164,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
     
     -- Insert initial metadata row if it doesn't exist
     INSERT INTO gobus_metadata (version, updated_at, total_subscriptions)
-    SELECT 1, NOW(), (SELECT COUNT(1) FROM gobus_subscriptions)
+    SELECT 1, NOW(), (SELECT COUNT(1) FROM gobus_subscriptions WHERE deleted_at IS NULL)
     WHERE NOT EXISTS (SELECT 1 FROM gobus_metadata);
     `)
 		if err != nil {
@@ -195,6 +203,7 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 	for rows.Next() {
 		var sub subscription
 		var planData []byte
+		var deletedAt sql.NullTime // Read but don't store in struct
 		if err := rows.Scan(
 			&sub.id,
 			&sub.queue,
@@ -203,6 +212,7 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 			&planData,
 			&sub.createdAt,
 			&sub.updatedAt,
+			&deletedAt, // Read deleted_at but don't use it
 			&sub.ttlMilliseconds,
 			&sub.heartbeatAt,
 			&sub.tokens[0],
@@ -289,18 +299,23 @@ func parsePatternTokens(pattern string) [bus.MaxPatternTokens]*string {
 	return tokens
 }
 
-const excludeExpired = "(ttl_milliseconds <= 0 OR (NOW() - heartbeat_at) <= (ttl_milliseconds * INTERVAL '1 millisecond'))"
+const (
+	// TODO: 这个可能对索引不友好，需要优化。并且目前索引里像 token 那些需要加 WHERE 吗？
+	excludeExpired = "(ttl_milliseconds <= 0 OR (NOW() - heartbeat_at) <= (ttl_milliseconds * INTERVAL '1 millisecond'))"
+	excludeDeleted = "deleted_at IS NULL"
+	excludeClause  = excludeDeleted + " AND " + excludeExpired
+)
 
 // buildSubscriptionQuery constructs the base SELECT query for subscriptions
-// with a customizable WHERE clause, excluding expired subscriptions
+// with a customizable WHERE clause, excluding expired and soft-deleted subscriptions
 func buildSubscriptionQuery(where string) string {
 	if where != "" {
-		where = fmt.Sprintf("(%s) AND %s", where, excludeExpired)
+		where = fmt.Sprintf("(%s) AND %s", where, excludeClause)
 	} else {
-		where = excludeExpired
+		where = excludeClause
 	}
 	return fmt.Sprintf(`
-		SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at,
+		SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at, deleted_at,
 		       ttl_milliseconds, heartbeat_at,
 		       token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
 		       token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15
@@ -465,7 +480,7 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 			_ = tx.Rollback()
 		}
 	}()
-
+	// TODO: 需要确保删除已经过期的订阅先
 	rows, err := tx.QueryContext(
 		ctx,
 		`INSERT INTO gobus_subscriptions 
@@ -474,7 +489,7 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
           token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
           token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15) 
          VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-         ON CONFLICT (queue, pattern) 
+         ON CONFLICT (queue, pattern) WHERE deleted_at IS NULL
          DO UPDATE SET 
             regex_pattern = EXCLUDED.regex_pattern,
             plan = EXCLUDED.plan,
@@ -497,7 +512,7 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
             token_13 = EXCLUDED.token_13,
             token_14 = EXCLUDED.token_14,
             token_15 = EXCLUDED.token_15
-		RETURNING id, queue, pattern, regex_pattern, plan, created_at, updated_at,
+		RETURNING id, queue, pattern, regex_pattern, plan, created_at, updated_at, deleted_at,
 		          ttl_milliseconds, heartbeat_at,
 		          token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
 		          token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15`,
@@ -538,7 +553,7 @@ func (d *Dialect) updateMetadata(ctx context.Context, tx *sql.Tx) error {
 		`UPDATE gobus_metadata SET 
             version = version + 1, 
             updated_at = NOW(),
-            total_subscriptions = (SELECT COUNT(1) FROM gobus_subscriptions)`)
+            total_subscriptions = (SELECT COUNT(1) FROM gobus_subscriptions WHERE deleted_at IS NULL)`)
 	if err != nil {
 		return errors.Wrap(err, "failed to update metadata")
 	}
@@ -555,7 +570,7 @@ func (d *Dialect) updateMetadata(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// delete removes a subscription for the given queue and pattern.
+// delete performs soft delete of a subscription for the given queue and pattern.
 func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error) {
 	if strings.TrimSpace(queue) == "" {
 		return errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
@@ -577,12 +592,13 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error
 
 	_, err = tx.ExecContext(
 		ctx,
-		`DELETE FROM gobus_subscriptions 
-         WHERE queue = $1 AND pattern = $2`,
+		`UPDATE gobus_subscriptions 
+         SET deleted_at = NOW(), updated_at = NOW() 
+         WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL`,
 		queue, pattern,
 	)
 	if err != nil {
-		return errors.Wrap(err, "failed to delete subscription")
+		return errors.Wrap(err, "failed to soft delete subscription")
 	}
 
 	if err := d.updateMetadata(ctx, tx); err != nil {
@@ -609,7 +625,7 @@ func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) er
 	result, err := d.db.ExecContext(ctx,
 		`UPDATE gobus_subscriptions 
          SET heartbeat_at = NOW() 
-         WHERE queue = $1 AND pattern = $2 AND `+excludeExpired,
+         WHERE queue = $1 AND pattern = $2 AND `+excludeClause,
 		queue, pattern)
 	if err != nil {
 		return errors.Wrap(err, "failed to update heartbeat")
@@ -627,8 +643,8 @@ func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) er
 	return nil
 }
 
-// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
-// Returns the number of subscriptions that were cleaned up.
+// CleanupExpiredSubscriptions soft deletes subscriptions that have exceeded their TTL.
+// Returns the number of subscriptions that were marked as deleted.
 func (d *Dialect) CleanupExpiredSubscriptions(ctx context.Context) (_ int64, xerr error) {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -641,11 +657,13 @@ func (d *Dialect) CleanupExpiredSubscriptions(ctx context.Context) (_ int64, xer
 	}()
 
 	result, err := tx.ExecContext(ctx,
-		`DELETE FROM gobus_subscriptions 
+		`UPDATE gobus_subscriptions 
+         SET deleted_at = NOW(), updated_at = NOW()
          WHERE ttl_milliseconds > 0 
-           AND (NOW() - heartbeat_at) > (ttl_milliseconds * INTERVAL '1 millisecond')`)
+           AND (NOW() - heartbeat_at) > (ttl_milliseconds * INTERVAL '1 millisecond')
+           AND deleted_at IS NULL`)
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to cleanup expired subscriptions")
+		return 0, errors.Wrap(err, "failed to soft delete expired subscriptions")
 	}
 
 	rowsAffected, err := result.RowsAffected()

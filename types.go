@@ -11,6 +11,7 @@ package bus
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/qor5/go-bus/quex"
 	"github.com/qor5/go-que"
@@ -38,6 +39,10 @@ type Subscription interface {
 	// Heartbeat updates the heartbeat timestamp for this subscription.
 	// This method should be called periodically to prevent TTL-based cleanup.
 	Heartbeat(ctx context.Context) error
+
+	// ExpiresAt returns the expiration time for this subscription.
+	// Returns zero time if the subscription never expires (no TTL).
+	ExpiresAt() time.Time
 }
 
 type Header = http.Header

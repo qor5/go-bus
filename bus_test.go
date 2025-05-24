@@ -1935,3 +1935,176 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 		assert.NotEqual(t, sub3.ID(), newID, "Should create new subscription since the previous one was expired and deleted")
 	})
 }
+
+// TestCacheWithTTLIntegration tests that cache properly handles TTL subscriptions
+func TestCacheWithTTLIntegration(t *testing.T) {
+	ctx := context.Background()
+	cleanupAllTables()
+
+	// Create cache-enabled bus
+	cache, err := bus.NewRistrettoCache(nil)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	t.Run("Cache Returns Valid TTL Subscriptions", func(t *testing.T) {
+		cachedBus, err := pgbus.New(db,
+			bus.WithMigrate(false), // Migration done already
+			bus.WithDialectDecorator(
+				bus.RistrettoDecorator(cache),
+			),
+		)
+		require.NoError(t, err)
+
+		queue := cachedBus.Queue("test-cache-ttl-queue")
+
+		// Create subscription with 2-second TTL
+		_, err = queue.Subscribe(ctx, "test.cache-ttl",
+			bus.WithTTL(2*time.Second),
+		)
+		require.NoError(t, err)
+
+		// First call - should populate cache
+		subs1, err := cachedBus.BySubject(ctx, "test.cache-ttl")
+		require.NoError(t, err)
+		assert.Len(t, subs1, 1, "Should find subscription")
+
+		// Verify the subscription has proper expiration
+		expiresAt := subs1[0].ExpiresAt()
+		assert.False(t, expiresAt.IsZero(), "TTL subscription should have expiration time")
+		assert.True(t, time.Now().Before(expiresAt), "Subscription should not be expired yet")
+
+		// Second call - should use cache (subscription still valid)
+		subs2, err := cachedBus.BySubject(ctx, "test.cache-ttl")
+		require.NoError(t, err)
+		assert.Len(t, subs2, 1, "Should still find subscription from cache")
+	})
+
+	t.Run("Cache Refreshes When TTL Subscriptions Expire", func(t *testing.T) {
+		cleanupAllTables()
+		cachedBus, err := pgbus.New(db,
+			bus.WithMigrate(false),
+			bus.WithDialectDecorator(
+				bus.RistrettoDecorator(cache),
+			),
+		)
+		require.NoError(t, err)
+
+		queue := cachedBus.Queue("test-cache-ttl-refresh-queue")
+
+		// Create subscription with very short TTL (1 second)
+		_, err = queue.Subscribe(ctx, "test.cache-refresh",
+			bus.WithTTL(1*time.Second),
+		)
+		require.NoError(t, err)
+
+		// First call - should populate cache and find subscription
+		subs1, err := cachedBus.BySubject(ctx, "test.cache-refresh")
+		require.NoError(t, err)
+		assert.Len(t, subs1, 1, "Should find subscription initially")
+
+		// Wait for subscription to expire
+		time.Sleep(1200 * time.Millisecond)
+
+		// Second call - cache should detect expiration and refresh from database
+		// The database query should filter out expired subscriptions
+		subs2, err := cachedBus.BySubject(ctx, "test.cache-refresh")
+		require.NoError(t, err)
+		assert.Len(t, subs2, 0, "Should not find expired subscription")
+	})
+
+	t.Run("Cache Handles Mixed TTL and Non-TTL Subscriptions", func(t *testing.T) {
+		cleanupAllTables()
+		cachedBus, err := pgbus.New(db,
+			bus.WithMigrate(false),
+			bus.WithDialectDecorator(
+				bus.RistrettoDecorator(cache),
+			),
+		)
+		require.NoError(t, err)
+
+		queue := cachedBus.Queue("test-cache-mixed-queue")
+
+		// Create permanent subscription (no TTL)
+		_, err = queue.Subscribe(ctx, "test.cache-permanent")
+		require.NoError(t, err)
+
+		// Create TTL subscription that will expire soon (1 second)
+		_, err = queue.Subscribe(ctx, "test.cache-expiring",
+			bus.WithTTL(1*time.Second),
+		)
+		require.NoError(t, err)
+
+		// Both should match this subject
+		subject := "test.cache-permanent"
+
+		// First call - should find permanent subscription
+		subs1, err := cachedBus.BySubject(ctx, subject)
+		require.NoError(t, err)
+		assert.Len(t, subs1, 1, "Should find permanent subscription")
+		assert.Equal(t, "test.cache-permanent", subs1[0].Pattern())
+		assert.True(t, subs1[0].ExpiresAt().IsZero(), "Permanent subscription should not have expiration time")
+
+		// Also check the expiring subscription matches its own subject
+		subs2, err := cachedBus.BySubject(ctx, "test.cache-expiring")
+		require.NoError(t, err)
+		assert.Len(t, subs2, 1, "Should find expiring subscription")
+		assert.False(t, subs2[0].ExpiresAt().IsZero(), "Expiring subscription should have expiration time")
+
+		// Wait for TTL subscription to expire
+		time.Sleep(1200 * time.Millisecond)
+
+		// Check permanent subscription is still there
+		subs3, err := cachedBus.BySubject(ctx, subject)
+		require.NoError(t, err)
+		assert.Len(t, subs3, 1, "Should still find permanent subscription")
+
+		// Check expiring subscription is now gone
+		subs4, err := cachedBus.BySubject(ctx, "test.cache-expiring")
+		require.NoError(t, err)
+		assert.Len(t, subs4, 0, "Should not find expired subscription")
+	})
+
+	t.Run("Cache Expiration Check Efficiency", func(t *testing.T) {
+		cleanupAllTables()
+		cachedBus, err := pgbus.New(db,
+			bus.WithMigrate(false),
+			bus.WithDialectDecorator(
+				bus.RistrettoDecorator(cache),
+			),
+		)
+		require.NoError(t, err)
+
+		queue := cachedBus.Queue("test-cache-efficiency-queue")
+
+		// Create subscription with long TTL (won't expire during test)
+		_, err = queue.Subscribe(ctx, "test.cache-long-ttl",
+			bus.WithTTL(10*time.Second),
+		)
+		require.NoError(t, err)
+
+		subject := "test.cache-long-ttl"
+
+		// First call - populates cache
+		startTime := time.Now()
+		subs1, err := cachedBus.BySubject(ctx, subject)
+		firstCallDuration := time.Since(startTime)
+		require.NoError(t, err)
+		assert.Len(t, subs1, 1, "Should find subscription")
+
+		// Subsequent calls should use cache (with expiration check)
+		startTime = time.Now()
+		subs2, err := cachedBus.BySubject(ctx, subject)
+		secondCallDuration := time.Since(startTime)
+		require.NoError(t, err)
+		assert.Len(t, subs2, 1, "Should find cached subscription")
+
+		// The second call should include expiration check but still be faster than database query
+		// (though this is not strictly guaranteed, it's a performance characteristic)
+		t.Logf("First call (DB): %v, Second call (cache with TTL check): %v",
+			firstCallDuration, secondCallDuration)
+
+		// Verify results are equivalent
+		assert.Equal(t, subs1[0].ID(), subs2[0].ID(), "Cached result should match original")
+		assert.Equal(t, subs1[0].Pattern(), subs2[0].Pattern(), "Cached pattern should match")
+	})
+}

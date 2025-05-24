@@ -195,7 +195,6 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 	for rows.Next() {
 		var sub subscription
 		var planData []byte
-		var heartbeatAt time.Time
 		if err := rows.Scan(
 			&sub.id,
 			&sub.queue,
@@ -205,7 +204,7 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 			&sub.createdAt,
 			&sub.updatedAt,
 			&sub.ttlSeconds,
-			&heartbeatAt,
+			&sub.heartbeatAt,
 			&sub.tokens[0],
 			&sub.tokens[1],
 			&sub.tokens[2],
@@ -680,6 +679,7 @@ type subscription struct {
 	createdAt    time.Time
 	updatedAt    time.Time
 	ttlSeconds   int64                         // TTL in seconds, 0 means no expiration
+	heartbeatAt  time.Time                     // Last heartbeat timestamp
 	tokens       [bus.MaxPatternTokens]*string // Parsed tokens for this subscription
 }
 
@@ -711,4 +711,14 @@ func (s *subscription) Unsubscribe(ctx context.Context) error {
 // Heartbeat updates the heartbeat timestamp for this subscription.
 func (s *subscription) Heartbeat(ctx context.Context) error {
 	return s.d.updateHeartbeat(ctx, s.queue, s.pattern)
+}
+
+// ExpiresAt returns the expiration time for this subscription.
+// Returns zero time if the subscription never expires (no TTL).
+func (s *subscription) ExpiresAt() time.Time {
+	if s.ttlSeconds <= 0 {
+		return time.Time{}
+	}
+
+	return s.heartbeatAt.Add(time.Duration(s.ttlSeconds) * time.Second)
 }

@@ -119,11 +119,14 @@ type SubscribeOption func(*SubscribeOptions)
 // SubscribeOptions contains the configuration for a subscription.
 type SubscribeOptions struct {
 	// PlanConfig contains the settings for job execution.
-	PlanConfig *PlanConfig
+	PlanConfig *PlanConfig `json:"planConfig"`
 
 	// TTL specifies how long the subscription should remain active without heartbeat.
 	// If set to zero or negative value, the subscription will never expire.
-	TTL time.Duration
+	TTL time.Duration `json:"ttl"`
+
+	// AutoDrain indicates whether to automatically execute Drain() when Unsubscribe() is called.
+	AutoDrain bool `json:"autoDrain"`
 }
 
 // WithPlanConfig sets the job configuration for a subscription.
@@ -139,6 +142,14 @@ func WithPlanConfig(config *PlanConfig) SubscribeOption {
 func WithTTL(ttl time.Duration) SubscribeOption {
 	return func(o *SubscribeOptions) {
 		o.TTL = ttl
+	}
+}
+
+// WithAutoDrain sets whether to automatically execute Drain() when Unsubscribe() is called.
+// When enabled, all pending jobs for the subscription will be cleaned up upon unsubscription.
+func WithAutoDrain(autoDrain bool) SubscribeOption {
+	return func(o *SubscribeOptions) {
+		o.AutoDrain = autoDrain
 	}
 }
 

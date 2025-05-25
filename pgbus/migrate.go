@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"github.com/qor5/go-bus"
 	"github.com/qor5/go-que/pg"
 )
 
@@ -26,11 +25,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
         queue VARCHAR(100) NOT NULL CHECK (char_length(TRIM(queue)) > 0 AND char_length(queue) <= 100),
         pattern VARCHAR(255) NOT NULL,
         regex_pattern VARCHAR(1024) NOT NULL,
-        plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+        options JSONB NOT NULL DEFAULT '{}'::jsonb, -- Complete SubscribeOptions configuration
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         deleted_at TIMESTAMP WITH TIME ZONE, -- Soft delete timestamp, NULL means not deleted
-        ttl_milliseconds INTEGER NOT NULL DEFAULT 0, -- TTL in milliseconds, 0 means no expiration
         expires_at TIMESTAMP WITH TIME ZONE, -- Pre-computed expiration time, NULL means never expires
         -- Pattern token columns for optimized indexed lookups
         token_0 VARCHAR(64),
@@ -100,41 +98,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
     SELECT 1, NOW(), (SELECT COUNT(1) FROM gobus_subscriptions WHERE deleted_at IS NULL)
     WHERE NOT EXISTS (SELECT 1 FROM gobus_metadata);
     
-    -- Create drain function for safe job cleanup with advisory locks
-    CREATE OR REPLACE FUNCTION gobus_drain_subscription_jobs(p_queue VARCHAR, p_pattern VARCHAR)
-    RETURNS INTEGER AS $$
-    DECLARE
-        job_record RECORD;
-        lock_acquired BOOLEAN;
-        deleted_count INTEGER := 0;
-    BEGIN
-        -- Loop through all jobs for this queue that match the subscription pattern
-        -- Only process jobs that are truly pending (not done, not expired, and retry_count = 0)
-        FOR job_record IN 
-            SELECT id FROM goque_jobs 
-            WHERE queue = p_queue 
-              AND args::jsonb->0->'header'->'`+bus.HeaderSubscriptionPattern+`'->>0 = p_pattern
-              AND (done_at IS NULL AND expired_at IS NULL AND retry_count = 0)
-            ORDER BY id
-        LOOP
-            -- Try to acquire an exclusive advisory lock on the job ID
-            -- This ensures we don't interfere with jobs that might be picked up
-            SELECT pg_try_advisory_lock(job_record.id) INTO lock_acquired;
-            
-            IF lock_acquired THEN
-                -- Delete the job
-                DELETE FROM goque_jobs WHERE id = job_record.id;
-                deleted_count := deleted_count + 1;
-                
-                -- Release the advisory lock
-                PERFORM pg_advisory_unlock(job_record.id);
-            END IF;
-            -- If lock couldn't be acquired, skip this job (it's likely being processed)
-        END LOOP;
-        
-        RETURN deleted_count;
-    END;
-    $$ LANGUAGE plpgsql;
+
     `)
 		if err != nil {
 			return errors.Wrap(err, "failed to create subscriptions table and indexes")

@@ -86,7 +86,7 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 	var subscriptions []bus.Subscription
 	for rows.Next() {
 		var sub subscription
-		var planData []byte
+		var optionsData []byte
 		var deletedAt sql.NullTime // Read but don't store in struct
 		var expiresAt sql.NullTime // Read expires_at, may be NULL
 		if err := rows.Scan(
@@ -94,11 +94,10 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 			&sub.queue,
 			&sub.pattern,
 			&sub.regexPattern,
-			&planData,
+			&optionsData,
 			&sub.createdAt,
 			&sub.updatedAt,
 			&deletedAt, // Read deleted_at but don't use it
-			&sub.ttlMilliseconds,
 			&expiresAt, // Scan expires_at into NullTime
 			&sub.tokens[0],
 			&sub.tokens[1],
@@ -122,8 +121,8 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 
 		sub.d = d
 
-		if err := json.Unmarshal(planData, &sub.planConfig); err != nil {
-			return nil, errors.Wrap(err, "failed to deserialize subscription plan")
+		if err := json.Unmarshal(optionsData, &sub.subscribeOptions); err != nil {
+			return nil, errors.Wrap(err, "failed to deserialize subscription options")
 		}
 
 		// Set expires_at from scanned NullTime
@@ -160,6 +159,17 @@ func compareTokens(a, b [bus.MaxPatternTokens]*string) bool {
 		}
 	}
 	return true
+}
+
+// compareSubscribeOptions compares two SubscribeOptions for equality
+func compareSubscribeOptions(a, b *bus.SubscribeOptions) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return a.TTL == b.TTL &&
+		a.AutoDrain == b.AutoDrain &&
+		a.PlanConfig.Equal(b.PlanConfig)
 }
 
 // parsePatternTokens splits a pattern into tokens for indexed lookup optimization
@@ -207,8 +217,8 @@ func buildSubscriptionQuery(where string) string {
 		where = excludeClause
 	}
 	return fmt.Sprintf(`
-		SELECT id, queue, pattern, regex_pattern, plan, created_at, updated_at, deleted_at,
-		       ttl_milliseconds, expires_at,
+		SELECT id, queue, pattern, regex_pattern, options, created_at, updated_at, deleted_at,
+		       expires_at,
 		       token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
 		       token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15
 		FROM gobus_subscriptions
@@ -328,22 +338,22 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 		return nil, err
 	}
 
-	planData, err := json.Marshal(opts.PlanConfig)
+	optionsData, err := json.Marshal(opts)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to serialize subscription plan")
+		return nil, errors.Wrap(err, "failed to serialize subscription options")
 	}
 
 	// Parse pattern into tokens for indexed lookup optimization
 	tokens := parsePatternTokens(pattern)
 
-	// Calculate TTL in milliseconds with validation
-	var ttlMilliseconds int64 = 0
+	// Calculate TTL in microseconds with validation
+	var ttlMicroseconds int64 = 0
 	if opts != nil && opts.TTL > 0 {
-		// Validate that TTL can be accurately represented in milliseconds
-		if opts.TTL%time.Millisecond != 0 {
-			return nil, errors.New("TTL must be divisible by time.Millisecond")
+		// Validate that TTL can be accurately represented in microseconds
+		if opts.TTL%time.Microsecond != 0 {
+			return nil, errors.New("TTL must be divisible by time.Microsecond")
 		}
-		ttlMilliseconds = int64(opts.TTL.Milliseconds())
+		ttlMicroseconds = int64(opts.TTL.Microseconds())
 	}
 
 	existingSub, err := d.byQueueAndPattern(ctx, queue, pattern)
@@ -356,9 +366,8 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 		if existingSub.pattern == pattern &&
 			existingSub.queue == queue &&
 			existingSub.regexPattern == regexPattern &&
-			opts.PlanConfig.Equal(existingSub.planConfig) &&
-			compareTokens(existingSub.tokens, tokens) &&
-			ttlMilliseconds == existingSub.ttlMilliseconds {
+			compareSubscribeOptions(opts, existingSub.subscribeOptions) &&
+			compareTokens(existingSub.tokens, tokens) {
 			return existingSub, nil
 		}
 	}
@@ -388,20 +397,20 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 	rows, err := tx.QueryContext(
 		ctx,
 		`INSERT INTO gobus_subscriptions 
-         (queue, pattern, regex_pattern, plan, created_at, updated_at,
-          ttl_milliseconds, expires_at,
+         (queue, pattern, regex_pattern, options, created_at, updated_at,
+          expires_at,
           token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
           token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15) 
-         VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, 
+         VALUES ($1, $2, $3, $4, NOW(), NOW(), 
                  CASE WHEN $5 <= 0 THEN NULL 
-                      ELSE NOW() + ($5 * INTERVAL '1 millisecond') 
+                      ELSE NOW() + ($5 * INTERVAL '1 microsecond') 
                  END,
                  $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-		RETURNING id, queue, pattern, regex_pattern, plan, created_at, updated_at, deleted_at,
-		          ttl_milliseconds, expires_at,
+		RETURNING id, queue, pattern, regex_pattern, options, created_at, updated_at, deleted_at,
+		          expires_at,
 		          token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
 		          token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15`,
-		queue, pattern, regexPattern, planData, ttlMilliseconds,
+		queue, pattern, regexPattern, optionsData, ttlMicroseconds,
 		tokens[0], tokens[1], tokens[2], tokens[3],
 		tokens[4], tokens[5], tokens[6], tokens[7],
 		tokens[8], tokens[9], tokens[10], tokens[11],
@@ -455,7 +464,33 @@ func (d *Dialect) updateMetadata(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// drainInTx removes all pending jobs for a specific subscription within a transaction.
+// This method uses PostgreSQL advisory locks to safely clean up jobs without affecting running jobs.
+// It filters jobs based on the subscription's pattern using the HeaderSubscriptionPattern header.
+// Returns the number of jobs that were deleted.
+func (d *Dialect) drainInTx(ctx context.Context, tx *sql.Tx, queue, pattern string) (int, error) {
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM goque_jobs 
+		WHERE queue = $1 
+		  AND args::jsonb->0->'header'->'`+bus.HeaderSubscriptionPattern+`'->>0 = $2
+		  AND (done_at IS NULL AND expired_at IS NULL AND retry_count = 0)
+		  AND pg_try_advisory_xact_lock(id)`,
+		queue, pattern)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to drain subscription jobs")
+	}
+
+	deletedCount, err := result.RowsAffected()
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to get deleted job count")
+	}
+
+	return int(deletedCount), nil
+}
+
 // delete performs soft delete of a subscription for the given queue and pattern.
+// If autoDrain is enabled in the subscription options, it will automatically
+// drain all pending jobs for the subscription in the same transaction.
 func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error) {
 	if strings.TrimSpace(queue) == "" {
 		return errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
@@ -475,15 +510,35 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error
 		}
 	}()
 
-	_, err = tx.ExecContext(
+	var optionsData []byte
+	err = tx.QueryRowContext(
 		ctx,
 		`UPDATE gobus_subscriptions 
          SET deleted_at = NOW(), updated_at = NOW() 
-         WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL`,
+         WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
+         RETURNING options`,
 		queue, pattern,
-	)
+	).Scan(&optionsData)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return errors.Wrap(bus.ErrSubscriptionNotFound, "subscription not found")
+		}
 		return errors.Wrap(err, "failed to soft delete subscription")
+	}
+
+	// Parse the options to check autoDrain setting
+	var options bus.SubscribeOptions
+	if err := json.Unmarshal(optionsData, &options); err != nil {
+		// If we can't parse options, continue without auto-drain
+		options.AutoDrain = false
+	}
+
+	// If autoDrain is enabled, clean up jobs in the same transaction
+	if options.AutoDrain {
+		_, err = d.drainInTx(ctx, tx, queue, pattern)
+		if err != nil {
+			return errors.Wrap(err, "failed to auto-drain subscription jobs")
+		}
 	}
 
 	if err := d.updateMetadata(ctx, tx); err != nil {
@@ -510,9 +565,10 @@ func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) er
 	result, err := d.db.ExecContext(ctx,
 		`UPDATE gobus_subscriptions 
          SET expires_at = CASE 
-                            WHEN ttl_milliseconds <= 0 THEN NULL 
-                            ELSE NOW() + (ttl_milliseconds * INTERVAL '1 millisecond') 
-                          END
+                            WHEN (options->>'ttl')::bigint <= 0 THEN NULL 
+                            ELSE NOW() + (((options->>'ttl')::bigint / 1000) * INTERVAL '1 microsecond') 
+                          END,
+             updated_at = NOW()
          WHERE queue = $1 AND pattern = $2 AND `+excludeClause,
 		queue, pattern)
 	if err != nil {
@@ -535,7 +591,7 @@ func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) er
 // This method uses PostgreSQL advisory locks to safely clean up jobs without affecting running jobs.
 // It filters jobs based on the subscription's pattern using the HeaderSubscriptionPattern header.
 // Returns the number of jobs that were deleted.
-func (d *Dialect) drain(ctx context.Context, queue, pattern string) (int, error) {
+func (d *Dialect) drain(ctx context.Context, queue, pattern string) (_ int, xerr error) {
 	if strings.TrimSpace(queue) == "" {
 		return 0, errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -544,12 +600,23 @@ func (d *Dialect) drain(ctx context.Context, queue, pattern string) (int, error)
 		return 0, err
 	}
 
-	var deletedCount int
-	err := d.db.QueryRowContext(ctx,
-		`SELECT gobus_drain_subscription_jobs($1, $2)`,
-		queue, pattern).Scan(&deletedCount)
+	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to drain subscription jobs")
+		return 0, errors.Wrap(err, "failed to begin transaction")
+	}
+	defer func() {
+		if xerr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	deletedCount, err := d.drainInTx(ctx, tx, queue, pattern)
+	if err != nil {
+		return 0, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, errors.Wrap(err, "failed to commit transaction")
 	}
 
 	return deletedCount, nil
@@ -559,17 +626,16 @@ var _ bus.Subscription = (*subscription)(nil)
 
 // subscription is an implementation of the Subscription interface.
 type subscription struct {
-	id              uint
-	queue           string
-	pattern         string
-	d               *Dialect
-	regexPattern    string
-	planConfig      *bus.PlanConfig
-	createdAt       time.Time
-	updatedAt       time.Time
-	ttlMilliseconds int64                         // TTL in milliseconds, 0 means no expiration
-	expiresAt       time.Time                     // Pre-computed expiration time, Zero means never expires
-	tokens          [bus.MaxPatternTokens]*string // Parsed tokens for this subscription
+	id               uint
+	queue            string
+	pattern          string
+	d                *Dialect
+	regexPattern     string
+	subscribeOptions *bus.SubscribeOptions
+	createdAt        time.Time
+	updatedAt        time.Time
+	expiresAt        time.Time                     // Pre-computed expiration time, Zero means never expires
+	tokens           [bus.MaxPatternTokens]*string // Parsed tokens for this subscription
 }
 
 // ID returns the unique identifier of the subscription.
@@ -589,10 +655,14 @@ func (s *subscription) Pattern() string {
 
 // PlanConfig returns the plan configuration for this subscription.
 func (s *subscription) PlanConfig() *bus.PlanConfig {
-	return s.planConfig
+	if s.subscribeOptions == nil {
+		return nil
+	}
+	return s.subscribeOptions.PlanConfig
 }
 
 // Unsubscribe removes this subscription.
+// If autoDrain was enabled, pending jobs will be automatically cleaned up.
 func (s *subscription) Unsubscribe(ctx context.Context) error {
 	return s.d.delete(ctx, s.queue, s.pattern)
 }

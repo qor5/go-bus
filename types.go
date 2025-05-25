@@ -109,6 +109,7 @@ type Subscription interface {
 	PlanConfig() *PlanConfig
 
 	// Unsubscribe removes this subscription.
+	// If autoDrain was enabled in the subscription options, pending jobs will be automatically cleaned up.
 	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
 	// This is because go-bus is designed to support offline messages.
 	Unsubscribe(ctx context.Context) error

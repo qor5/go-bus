@@ -206,7 +206,9 @@ if err != nil {
 defer consumer.Stop(context.Background())
 
 // Subscribe to broadcast topics
-sub, err := podQueue.Subscribe(ctx, "broadcast.events.>")
+// WithAutoDrain(true) ensures that all pending jobs will be automatically cleaned up
+// when this subscription is unsubscribed, which is essential for temporary queues
+sub, err := podQueue.Subscribe(ctx, "broadcast.events.>", bus.WithAutoDrain(true))
 if err != nil {
     log.Fatalf("Failed to create broadcast subscription: %v", err)
 }

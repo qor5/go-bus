@@ -203,7 +203,9 @@ if err != nil {
 defer consumer.Stop(context.Background())
 
 // 订阅广播主题
-sub, err := podQueue.Subscribe(ctx, "broadcast.events.>")
+// 使用 bus.WithAutoDrain(true) 确保当取消订阅时自动清理所有待处理的作业
+// 这对于临时队列来说非常重要，避免留下无用的任务
+sub, err := podQueue.Subscribe(ctx, "broadcast.events.>", bus.WithAutoDrain(true))
 if err != nil {
     log.Fatalf("创建广播订阅失败: %v", err)
 }

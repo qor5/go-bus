@@ -1972,9 +1972,9 @@ func TestSubscriptionDrain(t *testing.T) {
 		require.NoError(t, err, "Failed to start transaction 2")
 
 		// Lock some jobs (simulate processing)
-		_, err = tx1.Exec("SELECT pg_advisory_lock($1)", jobs[1].ID)
+		_, err = tx1.Exec("SELECT pg_advisory_xact_lock($1)", jobs[1].ID)
 		require.NoError(t, err, "Failed to lock job 1")
-		_, err = tx2.Exec("SELECT pg_advisory_lock($1)", jobs[3].ID)
+		_, err = tx2.Exec("SELECT pg_advisory_xact_lock($1)", jobs[3].ID)
 		require.NoError(t, err, "Failed to lock job 3")
 
 		// Drain should delete only unlocked jobs
@@ -2076,5 +2076,73 @@ func TestSubscriptionDrain(t *testing.T) {
 		assert.True(t, remainingIDs[jobs[2].ID], "Job 2 (retry_count != 0) should remain")
 		assert.True(t, remainingIDs[jobs[3].ID], "Job 3 (multiple conditions) should remain")
 		assert.False(t, remainingIDs[jobs[4].ID], "Job 4 (meets all conditions) should be deleted")
+	})
+}
+
+// TestAutoDrainOnUnsubscribe tests that autoDrain automatically cleans up jobs when unsubscribing
+func TestAutoDrainOnUnsubscribe(t *testing.T) {
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	t.Run("AutoDrainEnabled", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("auto_drain_enabled_queue")
+
+		// Create subscription with autoDrain enabled
+		sub, err := queue.Subscribe(ctx, "test.autodrain",
+			bus.WithAutoDrain(true),
+		)
+		require.NoError(t, err, "Failed to subscribe with autoDrain")
+
+		// Publish some messages to create jobs
+		for i := 0; i < 3; i++ {
+			_, err = b.Publish(ctx, "test.autodrain", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify jobs were created
+		jobs := getQueueJobs(t, "auto_drain_enabled_queue")
+		assert.Len(t, jobs, 3, "Should have 3 jobs before unsubscribe")
+
+		// Unsubscribe - should automatically drain jobs
+		err = sub.Unsubscribe(ctx)
+		require.NoError(t, err, "Failed to unsubscribe")
+
+		// Verify jobs were automatically drained
+		jobsAfter := getQueueJobs(t, "auto_drain_enabled_queue")
+		assert.Len(t, jobsAfter, 0, "Jobs should be automatically drained after unsubscribe")
+	})
+
+	t.Run("AutoDrainDisabled", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("auto_drain_disabled_queue")
+
+		// Create subscription without autoDrain (default is false)
+		sub, err := queue.Subscribe(ctx, "test.no_autodrain")
+		require.NoError(t, err, "Failed to subscribe without autoDrain")
+
+		// Publish some messages to create jobs
+		for i := 0; i < 3; i++ {
+			_, err = b.Publish(ctx, "test.no_autodrain", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify jobs were created
+		jobs := getQueueJobs(t, "auto_drain_disabled_queue")
+		assert.Len(t, jobs, 3, "Should have 3 jobs before unsubscribe")
+
+		// Unsubscribe - should NOT automatically drain jobs
+		err = sub.Unsubscribe(ctx)
+		require.NoError(t, err, "Failed to unsubscribe")
+
+		// Verify jobs were NOT automatically drained
+		jobsAfter := getQueueJobs(t, "auto_drain_disabled_queue")
+		assert.Len(t, jobsAfter, 3, "Jobs should remain after unsubscribe when autoDrain is disabled")
 	})
 }

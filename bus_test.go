@@ -1508,17 +1508,6 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, subs, 1, "Should only see non-TTL subscription after expiration")
 		assert.Equal(t, "test.no-ttl", subs[0].Pattern())
-
-		// Run cleanup - should find and remove the expired subscription from database
-		cleaned, err := b.CleanupExpiredSubscriptions(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1), cleaned, "Should only clean up expired TTL subscription from database")
-
-		// Verify non-TTL subscription still exists
-		subs, err = queue.Subscriptions(ctx)
-		require.NoError(t, err)
-		assert.Len(t, subs, 1, "Non-TTL subscription should remain")
-		assert.Equal(t, "test.no-ttl", subs[0].Pattern())
 	})
 
 	t.Run("Heartbeat Keeps Subscription Alive", func(t *testing.T) {
@@ -1554,11 +1543,6 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		subs, err = queue.Subscriptions(ctx)
 		require.NoError(t, err)
 		assert.Len(t, subs, 0, "Subscription should be filtered from queries after expiration")
-
-		// Run cleanup - should remove the subscription from database
-		cleaned, err := b.CleanupExpiredSubscriptions(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1), cleaned, "Should clean up expired subscription from database")
 
 		// Heartbeat should fail now (subscription was expired and then deleted)
 		err = sub.Heartbeat(ctx)
@@ -1761,11 +1745,6 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 		assert.Error(t, err, "Heartbeat should fail for expired subscription")
 		assert.Contains(t, err.Error(), "subscription not found or expired")
 
-		// Cleanup expired subscriptions
-		cleaned, err := b.CleanupExpiredSubscriptions(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1), cleaned, "Should clean up expired subscription from database")
-
 		sub3, err := queue.Subscribe(ctx, "test.upsert-revive",
 			bus.WithTTL(150*time.Millisecond),
 		)
@@ -1808,7 +1787,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT COUNT(*) 
 		FROM goque_jobs 
-		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
 	`, sub1.ID())
 	require.NoError(t, err, "Failed to query jobs by subscription ID")
 	defer rows.Close()
@@ -1823,7 +1802,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 	rows2, err := db.QueryContext(ctx, `
 		SELECT COUNT(*) 
 		FROM goque_jobs 
-		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
 	`, sub2.ID())
 	require.NoError(t, err, "Failed to query jobs by subscription ID")
 	defer rows2.Close()
@@ -1838,7 +1817,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 	rows3, err := db.QueryContext(ctx, `
 		SELECT COUNT(*) 
 		FROM goque_jobs 
-		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
 	`, "99999")
 	require.NoError(t, err, "Should not error for non-existent subscription ID")
 	defer rows3.Close()
@@ -1848,4 +1827,254 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 	err = rows3.Scan(&count3)
 	require.NoError(t, err, "Failed to scan count")
 	assert.Equal(t, 0, count3, "Should return 0 for non-existent subscription ID")
+}
+
+// TestSubscriptionDrain tests the Drain method functionality
+func TestSubscriptionDrain(t *testing.T) {
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	t.Run("BasicDrainFunctionality", func(t *testing.T) {
+		cleanupAllTables()
+
+		// Create queues and subscriptions
+		queue1 := b.Queue("drain_test_queue1")
+		queue2 := b.Queue("drain_test_queue2")
+
+		// Subscribe to different patterns
+		sub1, err := queue1.Subscribe(ctx, "test.drain.*")
+		require.NoError(t, err, "Failed to subscribe to pattern")
+
+		sub2, err := queue2.Subscribe(ctx, "test.drain.specific")
+		require.NoError(t, err, "Failed to subscribe to pattern")
+
+		// Publish messages that will create jobs
+		_, err = b.Publish(ctx, "test.drain.message1", []byte("payload1"))
+		require.NoError(t, err, "Failed to publish message1")
+
+		_, err = b.Publish(ctx, "test.drain.message2", []byte("payload2"))
+		require.NoError(t, err, "Failed to publish message2")
+
+		_, err = b.Publish(ctx, "test.drain.specific", []byte("payload3"))
+		require.NoError(t, err, "Failed to publish message3")
+
+		// Verify jobs were created
+		jobsQueue1 := getQueueJobs(t, "drain_test_queue1")
+		jobsQueue2 := getQueueJobs(t, "drain_test_queue2")
+		assert.Len(t, jobsQueue1, 3, "Queue1 should have 3 jobs") // matches test.drain.*
+		assert.Len(t, jobsQueue2, 1, "Queue2 should have 1 job")  // matches test.drain.specific
+
+		// Test drain on subscription 1
+		deletedCount1, err := sub1.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 3, deletedCount1, "Should have deleted 3 jobs from subscription 1")
+
+		// Verify jobs were deleted from queue1
+		jobsQueue1After := getQueueJobs(t, "drain_test_queue1")
+		assert.Len(t, jobsQueue1After, 0, "Queue1 should have no jobs after drain")
+
+		// Verify queue2 jobs are unaffected
+		jobsQueue2After := getQueueJobs(t, "drain_test_queue2")
+		assert.Len(t, jobsQueue2After, 1, "Queue2 should still have 1 job")
+
+		// Test drain on subscription 2
+		deletedCount2, err := sub2.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 1, deletedCount2, "Should have deleted 1 job from subscription 2")
+
+		// Verify all jobs are now drained
+		jobsQueue2Final := getQueueJobs(t, "drain_test_queue2")
+		assert.Len(t, jobsQueue2Final, 0, "Queue2 should have no jobs after drain")
+	})
+
+	t.Run("DrainWithNoJobs", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("empty_drain_queue")
+		sub, err := queue.Subscribe(ctx, "test.empty")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Drain when no jobs exist
+		deletedCount, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed even with no jobs")
+		assert.Equal(t, 0, deletedCount, "Should have deleted 0 jobs")
+	})
+
+	t.Run("DrainWithPatternFiltering", func(t *testing.T) {
+		cleanupAllTables()
+
+		// Create two subscriptions with different patterns on the same queue
+		queue := b.Queue("pattern_filter_queue")
+		sub1, err := queue.Subscribe(ctx, "orders.*")
+		require.NoError(t, err, "Failed to subscribe to orders.*")
+
+		sub2, err := queue.Subscribe(ctx, "events.*")
+		require.NoError(t, err, "Failed to subscribe to events.*")
+
+		// Publish messages to different subjects
+		_, err = b.Publish(ctx, "orders.new", []byte("order_payload"))
+		require.NoError(t, err, "Failed to publish order message")
+
+		_, err = b.Publish(ctx, "orders.updated", []byte("order_update_payload"))
+		require.NoError(t, err, "Failed to publish order update message")
+
+		_, err = b.Publish(ctx, "events.user_created", []byte("event_payload"))
+		require.NoError(t, err, "Failed to publish event message")
+
+		// Verify jobs were created
+		allJobs := getQueueJobs(t, "pattern_filter_queue")
+		assert.Len(t, allJobs, 3, "Should have 3 total jobs")
+
+		// Drain only orders.* pattern
+		deletedCount1, err := sub1.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 2, deletedCount1, "Should have deleted 2 jobs matching orders.*")
+
+		// Verify only event jobs remain
+		remainingJobs := getQueueJobs(t, "pattern_filter_queue")
+		assert.Len(t, remainingJobs, 1, "Should have 1 job remaining")
+
+		// Drain events.* pattern
+		deletedCount2, err := sub2.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 1, deletedCount2, "Should have deleted 1 job matching events.*")
+
+		// Verify all jobs are drained
+		finalJobs := getQueueJobs(t, "pattern_filter_queue")
+		assert.Len(t, finalJobs, 0, "Should have no jobs remaining")
+	})
+
+	t.Run("DrainMultipleJobsPartiallyLocked", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("partial_lock_queue")
+		sub, err := queue.Subscribe(ctx, "test.partial")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Publish multiple messages
+		for i := 0; i < 5; i++ {
+			_, err = b.Publish(ctx, "test.partial", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify all jobs were created
+		jobs := getQueueJobs(t, "partial_lock_queue")
+		require.Len(t, jobs, 5, "Should have 5 jobs")
+
+		// Start transactions to hold advisory locks
+		tx1, err := db.Begin()
+		require.NoError(t, err, "Failed to start transaction 1")
+		tx2, err := db.Begin()
+		require.NoError(t, err, "Failed to start transaction 2")
+
+		// Lock some jobs (simulate processing)
+		_, err = tx1.Exec("SELECT pg_advisory_lock($1)", jobs[1].ID)
+		require.NoError(t, err, "Failed to lock job 1")
+		_, err = tx2.Exec("SELECT pg_advisory_lock($1)", jobs[3].ID)
+		require.NoError(t, err, "Failed to lock job 3")
+
+		// Drain should delete only unlocked jobs
+		deletedCount, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 3, deletedCount, "Should have deleted 3 unlocked jobs")
+
+		// Verify only locked jobs remain
+		remainingJobs := getQueueJobs(t, "partial_lock_queue")
+		assert.Len(t, remainingJobs, 2, "Should have 2 locked jobs remaining")
+
+		// Release locks by committing transactions
+		err = tx1.Commit()
+		require.NoError(t, err, "Failed to commit transaction 1")
+		err = tx2.Commit()
+		require.NoError(t, err, "Failed to commit transaction 2")
+
+		// Drain remaining jobs
+		deletedCount2, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 2, deletedCount2, "Should have deleted 2 remaining jobs")
+
+		// Verify all jobs are deleted
+		finalJobs := getQueueJobs(t, "partial_lock_queue")
+		assert.Len(t, finalJobs, 0, "All jobs should be deleted")
+	})
+
+	t.Run("DrainErrorHandling", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("error_test_queue")
+		sub, err := queue.Subscribe(ctx, "test.error")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Test drain with cancelled context
+		cancelledCtx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err = sub.Drain(cancelledCtx)
+		assert.Error(t, err, "Drain should fail with cancelled context")
+	})
+
+	t.Run("DrainWithJobStatusFiltering", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("status_filter_queue")
+		sub, err := queue.Subscribe(ctx, "test.status")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Publish several messages to create jobs
+		for i := 0; i < 5; i++ {
+			_, err = b.Publish(ctx, "test.status", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify all jobs were created
+		jobs := getQueueJobs(t, "status_filter_queue")
+		require.Len(t, jobs, 5, "Should have 5 jobs")
+
+		// Test the filtering condition: (done_at IS NULL AND expired_at IS NULL AND retry_count = 0)
+		// For a job to be INCLUDED in drain, ALL conditions must be true:
+		// done_at IS NULL AND expired_at IS NULL AND retry_count = 0
+
+		// Job 0: Set done_at - should NOT be drained (done_at IS NOT NULL)
+		_, err = db.Exec("UPDATE goque_jobs SET done_at = NOW() WHERE id = $1", jobs[0].ID)
+		require.NoError(t, err, "Failed to mark job 0 as done")
+
+		// Job 1: Set expired_at - should NOT be drained (expired_at IS NOT NULL)
+		_, err = db.Exec("UPDATE goque_jobs SET expired_at = NOW() WHERE id = $1", jobs[1].ID)
+		require.NoError(t, err, "Failed to mark job 1 as expired")
+
+		// Job 2: Set retry_count != 0 - should NOT be drained (retry_count != 0)
+		_, err = db.Exec("UPDATE goque_jobs SET retry_count = 3 WHERE id = $1", jobs[2].ID)
+		require.NoError(t, err, "Failed to set job 2 retry_count to 3")
+
+		// Job 3: Set combination that excludes it - should NOT be drained
+		_, err = db.Exec("UPDATE goque_jobs SET done_at = NOW(), expired_at = NOW(), retry_count = 5 WHERE id = $1", jobs[3].ID)
+		require.NoError(t, err, "Failed to set job 3 to be excluded from drain")
+
+		// Job 4: Default to meet all conditions - should be drained (done_at IS NULL, expired_at IS NULL, retry_count = 0)
+
+		// Run drain - should delete only job 4
+		deletedCount, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 1, deletedCount, "Should have deleted 1 job that meets the AND condition")
+
+		// Verify jobs 0, 1, 2, 3 remain
+		remainingJobs := getQueueJobs(t, "status_filter_queue")
+		assert.Len(t, remainingJobs, 4, "Should have 4 jobs remaining")
+
+		// Verify which jobs remain
+		remainingIDs := make(map[int]bool)
+		for _, job := range remainingJobs {
+			remainingIDs[job.ID] = true
+		}
+
+		assert.True(t, remainingIDs[jobs[0].ID], "Job 0 (done) should remain")
+		assert.True(t, remainingIDs[jobs[1].ID], "Job 1 (expired) should remain")
+		assert.True(t, remainingIDs[jobs[2].ID], "Job 2 (retry_count != 0) should remain")
+		assert.True(t, remainingIDs[jobs[3].ID], "Job 3 (multiple conditions) should remain")
+		assert.False(t, remainingIDs[jobs[4].ID], "Job 4 (meets all conditions) should be deleted")
+	})
 }

@@ -401,8 +401,3 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (_ *Dispatch,
 func (b *BusImpl) BySubject(ctx context.Context, subject string) ([]Subscription, error) {
 	return b.dialect.BySubject(ctx, subject)
 }
-
-// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
-func (b *BusImpl) CleanupExpiredSubscriptions(ctx context.Context) (int64, error) {
-	return b.dialect.CleanupExpiredSubscriptions(ctx)
-}

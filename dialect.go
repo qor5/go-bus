@@ -37,9 +37,6 @@ type Dialect interface {
 	// Upsert creates or updates a subscription with the provided options.
 	Upsert(ctx context.Context, queue, pattern string, opts *SubscribeOptions) (Subscription, error)
 
-	// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
-	CleanupExpiredSubscriptions(ctx context.Context) (int64, error)
-
 	// BeginTx starts a transaction.
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 }

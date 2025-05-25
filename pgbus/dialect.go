@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"strings"
 	"time"
 
@@ -75,119 +74,6 @@ func (d *Dialect) GetMetadata(ctx context.Context) (*bus.Metadata, error) {
 		return nil, errors.Wrap(err, "failed to query metadata")
 	}
 	return &meta, nil
-}
-
-// Migrate creates the subscriptions table and indexes.
-func Migrate(ctx context.Context, db *sql.DB) error {
-	f := func() error {
-		err := pg.Migrate(db)
-		if err != nil {
-			return errors.Wrap(err, "failed to migrate go-que table")
-		}
-
-		_, err = db.ExecContext(ctx, `
-    CREATE TABLE IF NOT EXISTS gobus_subscriptions (
-        id SERIAL PRIMARY KEY,
-        queue VARCHAR(100) NOT NULL CHECK (char_length(TRIM(queue)) > 0 AND char_length(queue) <= 100),
-        pattern VARCHAR(255) NOT NULL,
-        regex_pattern VARCHAR(1024) NOT NULL,
-        plan JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-        deleted_at TIMESTAMP WITH TIME ZONE, -- Soft delete timestamp, NULL means not deleted
-        ttl_milliseconds INTEGER NOT NULL DEFAULT 0, -- TTL in milliseconds, 0 means no expiration
-        expires_at TIMESTAMP WITH TIME ZONE, -- Pre-computed expiration time, NULL means never expires
-        -- Pattern token columns for optimized indexed lookups
-        token_0 VARCHAR(64),
-        token_1 VARCHAR(64),
-        token_2 VARCHAR(64),
-        token_3 VARCHAR(64),
-        token_4 VARCHAR(64),
-        token_5 VARCHAR(64),
-        token_6 VARCHAR(64),
-        token_7 VARCHAR(64),
-        token_8 VARCHAR(64),
-        token_9 VARCHAR(64),
-        token_10 VARCHAR(64),
-        token_11 VARCHAR(64),
-        token_12 VARCHAR(64),
-        token_13 VARCHAR(64),
-        token_14 VARCHAR(64),
-        token_15 VARCHAR(64)
-    );
-    
-	 -- Index for created_at, updated_at, deleted_at
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_deleted_at_idx
-        ON gobus_subscriptions (deleted_at);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_created_at_idx
-        ON gobus_subscriptions (created_at);
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_updated_at_idx
-        ON gobus_subscriptions (updated_at);
-
-    -- Partial unique constraint: only for non-deleted records
-    CREATE UNIQUE INDEX IF NOT EXISTS gobus_subscriptions_queue_pattern_idx 
-        ON gobus_subscriptions (queue, pattern) WHERE deleted_at IS NULL;
-    
-    -- Index for queue lookups (only for active subscriptions)
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_queue_idx 
-        ON gobus_subscriptions (queue) WHERE deleted_at IS NULL;
-        
-    -- Index for expires_at field - enables fast expiration checks
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_expires_at_idx
-        ON gobus_subscriptions (expires_at) WHERE deleted_at IS NULL;
-        
-    -- Optimized indexes for pattern token lookups (only active records)
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_0_idx ON gobus_subscriptions (token_0) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_1_idx ON gobus_subscriptions (token_1) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_2_idx ON gobus_subscriptions (token_2) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_3_idx ON gobus_subscriptions (token_3) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_4_idx ON gobus_subscriptions (token_4) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_5_idx ON gobus_subscriptions (token_5) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_6_idx ON gobus_subscriptions (token_6) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_7_idx ON gobus_subscriptions (token_7) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_8_idx ON gobus_subscriptions (token_8) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_9_idx ON gobus_subscriptions (token_9) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_10_idx ON gobus_subscriptions (token_10) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_11_idx ON gobus_subscriptions (token_11) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_12_idx ON gobus_subscriptions (token_12) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_13_idx ON gobus_subscriptions (token_13) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_14_idx ON gobus_subscriptions (token_14) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS gobus_subscriptions_token_15_idx ON gobus_subscriptions (token_15) WHERE deleted_at IS NULL;
-        
-    CREATE TABLE IF NOT EXISTS gobus_metadata (
-        version BIGINT NOT NULL DEFAULT 1,
-        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-        total_subscriptions BIGINT NOT NULL DEFAULT 0
-    );
-    
-    -- Insert initial metadata row if it doesn't exist
-    INSERT INTO gobus_metadata (version, updated_at, total_subscriptions)
-    SELECT 1, NOW(), (SELECT COUNT(1) FROM gobus_subscriptions WHERE deleted_at IS NULL)
-    WHERE NOT EXISTS (SELECT 1 FROM gobus_metadata);
-    `)
-		if err != nil {
-			return errors.Wrap(err, "failed to create subscriptions table and indexes")
-		}
-
-		return nil
-	}
-	for attempts := 0; attempts < MaxMigrationAttempts; attempts++ {
-		err := f()
-		if err == nil {
-			return nil
-		}
-		if strings.Contains(err.Error(), `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`) ||
-			strings.Contains(err.Error(), "already exists (SQLSTATE 42P07)") {
-			select {
-			case <-ctx.Done():
-				return errors.Wrap(ctx.Err(), "failed to migrate")
-			case <-time.After(time.Duration(100+rand.Intn(100)) * time.Millisecond):
-			}
-			continue
-		}
-		return err
-	}
-	return nil
 }
 
 // Migrate creates the subscriptions table and indexes.
@@ -645,52 +531,35 @@ func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) er
 	return nil
 }
 
-// CleanupExpiredSubscriptions soft deletes subscriptions that have exceeded their TTL.
-// Returns the number of subscriptions that were marked as deleted.
-func (d *Dialect) CleanupExpiredSubscriptions(ctx context.Context) (_ int64, xerr error) {
-	tx, err := d.BeginTx(ctx, nil)
+// drain removes all pending jobs for a specific subscription.
+// This method uses PostgreSQL advisory locks to safely clean up jobs without affecting running jobs.
+// It filters jobs based on the subscription's pattern using the HeaderSubscriptionPattern header.
+// Returns the number of jobs that were deleted.
+func (d *Dialect) drain(ctx context.Context, queue, pattern string) (int, error) {
+	if strings.TrimSpace(queue) == "" {
+		return 0, errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
+	}
+
+	if err := bus.ValidatePattern(pattern); err != nil {
+		return 0, err
+	}
+
+	var deletedCount int
+	err := d.db.QueryRowContext(ctx,
+		`SELECT gobus_drain_subscription_jobs($1, $2)`,
+		queue, pattern).Scan(&deletedCount)
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to begin transaction")
-	}
-	defer func() {
-		if xerr != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	result, err := tx.ExecContext(ctx,
-		`UPDATE gobus_subscriptions 
-         SET deleted_at = NOW(), updated_at = NOW()
-         WHERE expires_at IS NOT NULL 
-           AND NOW() >= expires_at
-           AND deleted_at IS NULL`)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to soft delete expired subscriptions")
+		return 0, errors.Wrap(err, "failed to drain subscription jobs")
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to get affected rows")
-	}
-
-	if rowsAffected > 0 {
-		if err := d.updateMetadata(ctx, tx); err != nil {
-			return 0, err
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return 0, errors.Wrap(err, "failed to commit transaction")
-	}
-
-	return rowsAffected, nil
+	return deletedCount, nil
 }
 
 var _ bus.Subscription = (*subscription)(nil)
 
 // subscription is an implementation of the Subscription interface.
 type subscription struct {
-	id              int64
+	id              uint
 	queue           string
 	pattern         string
 	d               *Dialect
@@ -737,4 +606,11 @@ func (s *subscription) Heartbeat(ctx context.Context) error {
 // Returns zero time if the subscription never expires (no TTL).
 func (s *subscription) ExpiresAt() time.Time {
 	return s.expiresAt
+}
+
+// Drain removes all pending jobs that are not currently being processed.
+// This method is useful for cleaning up the queue without affecting jobs that are already running.
+// Returns the number of jobs that were deleted.
+func (s *subscription) Drain(ctx context.Context) (int, error) {
+	return s.d.drain(ctx, s.queue, s.pattern)
 }

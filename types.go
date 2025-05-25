@@ -92,10 +92,6 @@ type Bus interface {
 
 	// BySubject returns all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)
-
-	// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
-	// Returns the number of subscriptions that were cleaned up.
-	CleanupExpiredSubscriptions(ctx context.Context) (int64, error)
 }
 
 // Subscription represents an active subscription to a subject pattern.
@@ -124,4 +120,9 @@ type Subscription interface {
 	// ExpiresAt returns the expiration time for this subscription.
 	// Returns zero time if the subscription never expires (no TTL).
 	ExpiresAt() time.Time
+
+	// Drain removes all pending jobs that are not currently being processed.
+	// This method is useful for cleaning up the queue without affecting jobs that are already running.
+	// Returns the number of jobs that were deleted.
+	Drain(ctx context.Context) (int, error)
 }

@@ -75,6 +75,7 @@ workerConfig := bus.WorkerConfig{
 
 consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     // 处理消息...
+    fmt.Printf("处理消息: %s\n", string(msg.Payload))
 
     // 如果需要丢弃消息，可以使用 Destroy 而不是 Done
     return msg.Destroy(ctx)
@@ -96,7 +97,7 @@ multiLevelSub, err := queue.Subscribe(ctx, "notifications.>")          // 多级
 // 带自定义配置的订阅
 customPlan := bus.PlanConfig{
     RunAtDelta: 200 * time.Millisecond,
-    RetryPolicy: que.RetryPolicy{
+    RetryPolicy: &que.RetryPolicy{
         InitialInterval:        2 * time.Second,
         MaxInterval:            20 * time.Second,
         NextIntervalMultiplier: 2.0,
@@ -105,7 +106,7 @@ customPlan := bus.PlanConfig{
     },
 }
 
-customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(customPlan))
+customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(&customPlan))
 
 // 取消特定订阅
 // 这个方法通常是确认不需要订阅的时候才执行，并非应该伴随程序退出执行。因为 go-bus 设计上是支持离线消息的。
@@ -116,13 +117,13 @@ err = customSub.Unsubscribe(ctx)
 
 ```go
 // 基本发布
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
+_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
 
 // 带唯一ID的发布（用于消息去重）
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
+_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
 
 // 带头部信息的发布
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
+_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
     "Content-Type": []string{"application/json"},
     "X-Request-ID": []string{"req-123456"},
 }))
@@ -136,7 +137,7 @@ outbound := &bus.Outbound{
     },
     UniqueID: bus.UniqueID("order-12345"), // 可选的唯一ID，用于消息去重
 }
-err = bus.Dispatch(ctx, outbound)
+_, err = bus.Dispatch(ctx, outbound)
 
 // 一次性发布多条消息
 outbound1 := &bus.Outbound{
@@ -154,7 +155,7 @@ outbound2 := &bus.Outbound{
     UniqueID: bus.UniqueID("notification-user123-order-created"),
 }
 // Dispatch 方法支持在一次调用中发布多个 outbound 消息
-err = bus.Dispatch(ctx, outbound1, outbound2)
+_, err = bus.Dispatch(ctx, outbound1, outbound2)
 ```
 
 ### 查找匹配订阅
@@ -169,7 +170,7 @@ for _, sub := range subs {
 // 获取特定队列的所有订阅
 queueSubs, err := queue.Subscriptions(ctx)
 for _, sub := range queueSubs {
-    fmt.Printf("模式: %s, 创建时间: %s\n", sub.Pattern(), sub.CreatedAt())
+    fmt.Printf("模式: %s, ID: %s\n", sub.Pattern(), sub.ID())
 }
 ```
 
@@ -255,12 +256,12 @@ sub1, err := queue.Subscribe(ctx, "orders.>")
 
 // 后来创建的订阅 - 使用自定义重试策略
 customPlan := bus.PlanConfig{
-    RetryPolicy: que.RetryPolicy{
+    RetryPolicy: &que.RetryPolicy{
         MaxRetryCount: 10,
         // 其他配置...
     },
 }
-sub2, err := queue.Subscribe(ctx, "orders.created", bus.WithPlanConfig(customPlan))
+sub2, err := queue.Subscribe(ctx, "orders.created", bus.WithPlanConfig(&customPlan))
 ```
 
 当发布一条 `orders.created` 主题的消息时：
@@ -281,12 +282,12 @@ sub1, err := queue1.Subscribe(ctx, "orders.>")
 // 第二个队列专门处理 orders.created 事件，使用自定义配置
 queue2 := bus.Queue("orders_created_queue")
 customPlan := bus.PlanConfig{
-    RetryPolicy: que.RetryPolicy{
+    RetryPolicy: &que.RetryPolicy{
         MaxRetryCount: 10,
         // 其他配置...
     },
 }
-sub2, err := queue2.Subscribe(ctx, "orders.created", bus.WithPlanConfig(customPlan))
+sub2, err := queue2.Subscribe(ctx, "orders.created", bus.WithPlanConfig(&customPlan))
 ```
 
 这样，两个订阅会分别在各自的队列中独立处理消息，各自的配置都能生效。

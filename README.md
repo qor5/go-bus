@@ -77,6 +77,7 @@ workerConfig := bus.WorkerConfig{
 
 consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     // Process message...
+    fmt.Printf("Processing message: %s\n", string(msg.Payload))
 
     // If you want to discard the message, use Destroy instead of Done
     return msg.Destroy(ctx)
@@ -98,7 +99,7 @@ multiLevelSub, err := queue.Subscribe(ctx, "notifications.>")          // Multi-
 // Subscription with custom configuration
 customPlan := bus.PlanConfig{
     RunAtDelta: 200 * time.Millisecond,
-    RetryPolicy: que.RetryPolicy{
+    RetryPolicy: &que.RetryPolicy{
         InitialInterval:        2 * time.Second,
         MaxInterval:            20 * time.Second,
         NextIntervalMultiplier: 2.0,
@@ -107,7 +108,7 @@ customPlan := bus.PlanConfig{
     },
 }
 
-customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(customPlan))
+customSub, err := queue.Subscribe(ctx, "payments.processed", bus.WithPlanConfig(&customPlan))
 
 // Unsubscribe from a specific subscription
 // This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
@@ -119,13 +120,13 @@ err = customSub.Unsubscribe(ctx)
 
 ```go
 // Basic publish
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
+_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
 
 // Publishing with unique ID (for deduplication)
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
+_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
 
 // Publishing with headers
-err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
+_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
     "Content-Type": []string{"application/json"},
     "X-Request-ID": []string{"req-123456"},
 }))
@@ -139,7 +140,7 @@ outbound := &bus.Outbound{
     },
     UniqueID: bus.UniqueID("order-12345"), // Optional unique ID for message deduplication
 }
-err = bus.Dispatch(ctx, outbound)
+_, err = bus.Dispatch(ctx, outbound)
 
 // Publishing multiple messages at once
 outbound1 := &bus.Outbound{
@@ -157,7 +158,7 @@ outbound2 := &bus.Outbound{
     UniqueID: bus.UniqueID("notification-user123-order-created"),
 }
 // Dispatch supports publishing multiple outbound messages in a single call
-err = bus.Dispatch(ctx, outbound1, outbound2)
+_, err = bus.Dispatch(ctx, outbound1, outbound2)
 ```
 
 ### Finding Matching Subscriptions
@@ -172,7 +173,7 @@ for _, sub := range subs {
 // Get all subscriptions for a specific queue
 queueSubs, err := queue.Subscriptions(ctx)
 for _, sub := range queueSubs {
-    fmt.Printf("Pattern: %s, Created at: %s\n", sub.Pattern(), sub.CreatedAt())
+    fmt.Printf("Pattern: %s, ID: %s\n", sub.Pattern(), sub.ID())
 }
 ```
 
@@ -193,11 +194,11 @@ import (
 podQueueName := fmt.Sprintf("broadcast-receiver-%s", uuid.New().String())
 podQueue := bus.Queue(podQueueName)
 
-// Start consuming messages (starts workers but doesn't block)
+// Start consuming messages
 consumer, err := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     log.Printf("Instance %s received broadcast message: %s - %s",
         podQueueName, msg.Subject, string(msg.Payload))
-    return msg.Destory(ctx)
+    return msg.Destroy(ctx)
 })
 if err != nil {
     log.Printf("Failed to start consumer: %v", err)
@@ -258,12 +259,12 @@ sub1, err := queue.Subscribe(ctx, "orders.>")
 
 // Later created subscription - with custom retry strategy
 customPlan := bus.PlanConfig{
-    RetryPolicy: que.RetryPolicy{
+    RetryPolicy: &que.RetryPolicy{
         MaxRetryCount: 10,
         // Other configurations...
     },
 }
-sub2, err := queue.Subscribe(ctx, "orders.created", bus.WithPlanConfig(customPlan))
+sub2, err := queue.Subscribe(ctx, "orders.created", bus.WithPlanConfig(&customPlan))
 ```
 
 When publishing a message with the subject `orders.created`:
@@ -284,12 +285,12 @@ sub1, err := queue1.Subscribe(ctx, "orders.>")
 // Second queue specifically handles orders.created events with custom configuration
 queue2 := bus.Queue("orders_created_queue")
 customPlan := bus.PlanConfig{
-    RetryPolicy: que.RetryPolicy{
+    RetryPolicy: &que.RetryPolicy{
         MaxRetryCount: 10,
         // Other configurations...
     },
 }
-sub2, err := queue2.Subscribe(ctx, "orders.created", bus.WithPlanConfig(customPlan))
+sub2, err := queue2.Subscribe(ctx, "orders.created", bus.WithPlanConfig(&customPlan))
 ```
 
 This way, the two subscriptions will process messages independently in their respective queues, and each configuration will be effective.

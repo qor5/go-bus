@@ -84,11 +84,11 @@ type Bus interface {
 	Queue(name string) Queue
 
 	// Publish sends a payload to all queues with subscriptions matching the subject.
-	Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) error
+	Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) (*Dispatch, error)
 
 	// Dispatch sends outbound messages to all queues with subscriptions matching the subject.
 	// All messages are processed in a single transaction.
-	Dispatch(ctx context.Context, msgs ...*Outbound) error
+	Dispatch(ctx context.Context, msgs ...*Outbound) (*Dispatch, error)
 
 	// BySubject returns all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)
@@ -110,7 +110,7 @@ type Subscription interface {
 	Pattern() string
 
 	// PlanConfig returns the plan configuration for this subscription.
-	PlanConfig() PlanConfig
+	PlanConfig() *PlanConfig
 
 	// Unsubscribe removes this subscription.
 	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.

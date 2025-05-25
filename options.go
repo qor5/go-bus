@@ -13,8 +13,8 @@ import (
 )
 
 // DefaultRetryPolicyFactory provides a default retry policy for published messages.
-var DefaultRetryPolicyFactory = func() que.RetryPolicy {
-	return que.RetryPolicy{
+var DefaultRetryPolicyFactory = func() *que.RetryPolicy {
+	return &que.RetryPolicy{
 		InitialInterval:        30 * time.Second,
 		MaxInterval:            600 * time.Second,
 		NextIntervalMultiplier: 2,
@@ -24,8 +24,8 @@ var DefaultRetryPolicyFactory = func() que.RetryPolicy {
 }
 
 // DefaultPlanConfigFactory provides default settings for subscription jobs.
-var DefaultPlanConfigFactory = func() PlanConfig {
-	return PlanConfig{
+var DefaultPlanConfigFactory = func() *PlanConfig {
+	return &PlanConfig{
 		RetryPolicy:     DefaultRetryPolicyFactory(),
 		RunAtDelta:      0, // Immediate execution
 		UniqueLifecycle: que.Ignore,
@@ -33,8 +33,8 @@ var DefaultPlanConfigFactory = func() PlanConfig {
 }
 
 // DefaultWorkerConfigFactory provides default settings for workers.
-var DefaultWorkerConfigFactory = func() WorkerConfig {
-	return WorkerConfig{
+var DefaultWorkerConfigFactory = func() *WorkerConfig {
+	return &WorkerConfig{
 		MaxLockPerSecond:          5,
 		MaxBufferJobsCount:        0,
 		MaxPerformPerSecond:       1000,
@@ -70,18 +70,22 @@ type WorkerConfig struct {
 // PlanConfig defines how a queue processes messages for a specific subject pattern.
 type PlanConfig struct {
 	// RetryPolicy defines how to retry failed job executions.
-	RetryPolicy que.RetryPolicy `json:"retryPolicy"`
+	RetryPolicy *que.RetryPolicy
 
 	// RunAtDelta specifies the duration to delay job execution from the time of message receipt.
 	// Zero means execute immediately, positive values mean delayed execution.
-	RunAtDelta time.Duration `json:"runAtDelta"`
+	RunAtDelta time.Duration
 
 	// UniqueLifecycle controls the uniqueness behavior of the job.
-	UniqueLifecycle que.UniqueLifecycle `json:"uniqueLifecycle"`
+	UniqueLifecycle que.UniqueLifecycle
 }
 
 // Equal compares this PlanConfig with another and returns true if they are equivalent.
-func (p PlanConfig) Equal(other PlanConfig) bool {
+func (p *PlanConfig) Equal(other *PlanConfig) bool {
+	if p == nil || other == nil {
+		return p == other
+	}
+
 	if p.RunAtDelta != other.RunAtDelta || p.UniqueLifecycle != other.UniqueLifecycle {
 		return false
 	}
@@ -99,11 +103,11 @@ type ConsumeOption func(*ConsumeOptions)
 // ConsumeOptions holds all the options for creating a worker.
 type ConsumeOptions struct {
 	// WorkerConfig contains the performance-related settings for a worker.
-	WorkerConfig WorkerConfig
+	WorkerConfig *WorkerConfig
 }
 
 // WithWorkerConfig sets the worker configuration for a worker.
-func WithWorkerConfig(config WorkerConfig) ConsumeOption {
+func WithWorkerConfig(config *WorkerConfig) ConsumeOption {
 	return func(opts *ConsumeOptions) {
 		opts.WorkerConfig = config
 	}
@@ -115,7 +119,7 @@ type SubscribeOption func(*SubscribeOptions)
 // SubscribeOptions contains the configuration for a subscription.
 type SubscribeOptions struct {
 	// PlanConfig contains the settings for job execution.
-	PlanConfig PlanConfig
+	PlanConfig *PlanConfig
 
 	// TTL specifies how long the subscription should remain active without heartbeat.
 	// If set to zero or negative value, the subscription will never expire.
@@ -123,7 +127,7 @@ type SubscribeOptions struct {
 }
 
 // WithPlanConfig sets the job configuration for a subscription.
-func WithPlanConfig(config PlanConfig) SubscribeOption {
+func WithPlanConfig(config *PlanConfig) SubscribeOption {
 	return func(opts *SubscribeOptions) {
 		opts.PlanConfig = config
 	}

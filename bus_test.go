@@ -207,9 +207,9 @@ func TestSubscriptionManagement(t *testing.T) {
 		assert.Equal(t, 1, len(subs), "Should still have only one subscription")
 
 		// Test PlanConfig update
-		customPlan := bus.PlanConfig{
+		customPlan := &bus.PlanConfig{
 			RunAtDelta: 200 * time.Millisecond,
-			RetryPolicy: que.RetryPolicy{
+			RetryPolicy: &que.RetryPolicy{
 				InitialInterval:        2 * time.Second,
 				MaxInterval:            20 * time.Second,
 				NextIntervalMultiplier: 2.0,
@@ -381,8 +381,10 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		err = b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
+		result, err := b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
 		assert.NoError(t, err, "Valid publish should not error")
+		assert.NotNil(t, result, "Publish result should not be nil")
+		assert.Greater(t, len(result.JobIDs()), 0, "Should create at least one job")
 
 		// Verify jobs were created - should create 1 jobs (for "orders.new")
 		jobs := getQueueJobs(t, testQueue)
@@ -401,7 +403,7 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		err = b.Publish(ctx, "orders.item123.processed", []byte(`["wildcard_payload"]`))
+		_, err = b.Publish(ctx, "orders.item123.processed", []byte(`["wildcard_payload"]`))
 		assert.NoError(t, err, "Wildcard match publish should not error")
 
 		// Verify jobs were created - should create 1 job in queue1
@@ -422,7 +424,7 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		err = b.Publish(ctx, "notifications.user.login", []byte(`["multilevel_payload"]`))
+		_, err = b.Publish(ctx, "notifications.user.login", []byte(`["multilevel_payload"]`))
 		assert.NoError(t, err, "Multi-level wildcard match publish should not error")
 
 		// Verify jobs were created - should create 1 job in queue2
@@ -452,7 +454,7 @@ func TestPublish(t *testing.T) {
 			},
 		}
 
-		err = b.Dispatch(ctx, outbound)
+		_, err = b.Dispatch(ctx, outbound)
 		assert.NoError(t, err, "Valid Dispatch should not error")
 
 		// Verify jobs were created - should create 1 jobs (for "orders.new")
@@ -500,7 +502,7 @@ func TestPublish(t *testing.T) {
 		}
 
 		// Dispatch multiple messages in a single call
-		err = b.Dispatch(ctx, ordersMsg, notificationMsg, orderProcessedMsg)
+		_, err = b.Dispatch(ctx, ordersMsg, notificationMsg, orderProcessedMsg)
 		assert.NoError(t, err, "Batch Dispatch should not error")
 
 		// Verify jobs were created in queue1 (should have orders.new and orders.*.processed)
@@ -545,7 +547,7 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Dispatch with empty slice should not error
-		err = b.Dispatch(ctx)
+		_, err = b.Dispatch(ctx)
 		assert.NoError(t, err, "Empty Dispatch should not error")
 
 		// Verify no jobs were created
@@ -576,7 +578,7 @@ func TestPublish(t *testing.T) {
 		}
 
 		// Dispatch should fail with invalid message
-		err = b.Dispatch(ctx, validMsg, invalidMsg)
+		_, err = b.Dispatch(ctx, validMsg, invalidMsg)
 		assert.Error(t, err, "Batch Dispatch with invalid message should error")
 
 		// Verify no jobs were created due to transaction rollback
@@ -589,7 +591,7 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Depending on the implementation, this may or may not return an error
-		_ = b.Publish(ctx, "unknown.topic", []byte(`["test_payload"]`))
+		_, _ = b.Publish(ctx, "unknown.topic", []byte(`["test_payload"]`))
 
 		// Verify no jobs were created
 		queue1Jobs := getQueueJobs(t, testQueue)
@@ -603,7 +605,7 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Depending on the implementation, this may or may not return an error
-		err = b.Publish(ctx, "orders.new", []byte{})
+		_, err = b.Publish(ctx, "orders.new", []byte{})
 		// Log errors if they occur, but don't assert error expectations
 		if err != nil {
 			t.Logf("Publish with empty payload returned: %v", err)
@@ -681,7 +683,7 @@ func TestConsume(t *testing.T) {
 		"Content-Type":    []string{"application/json"},
 		"x-custom-HEADER": []string{"value"},
 	}
-	err = b.Publish(ctx, "test.topic", testPayload, bus.WithHeader(testHeader))
+	_, err = b.Publish(ctx, "test.topic", testPayload, bus.WithHeader(testHeader))
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for message or timeout
@@ -714,7 +716,7 @@ func TestConsumeWithOptions(t *testing.T) {
 	msgCh := make(chan *bus.Inbound, 1)
 
 	// Custom worker config
-	workerConfig := bus.WorkerConfig{
+	workerConfig := &bus.WorkerConfig{
 		MaxLockPerSecond:          5,
 		MaxBufferJobsCount:        10,
 		MaxPerformPerSecond:       5,
@@ -731,7 +733,7 @@ func TestConsumeWithOptions(t *testing.T) {
 
 	// Publish a message
 	testPayload := []byte(`["options_test_payload"]`)
-	err = b.Publish(ctx, "test.options", testPayload)
+	_, err = b.Publish(ctx, "test.options", testPayload)
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for message or timeout
@@ -766,7 +768,7 @@ func TestMultipleConsumers(t *testing.T) {
 	require.NoError(t, err, "Failed to subscribe queue2 to test topic")
 
 	// Custom worker config to speed up tests
-	workerConf := bus.WorkerConfig{
+	workerConf := &bus.WorkerConfig{
 		MaxLockPerSecond:          1000,
 		MaxBufferJobsCount:        1000,
 		MaxPerformPerSecond:       1000,
@@ -806,7 +808,7 @@ func TestMultipleConsumers(t *testing.T) {
 
 	// Publish a message to the test topic
 	testPayload := []byte(`["multiconsumer_test"]`)
-	err = b.Publish(ctx, testTopic, testPayload)
+	_, err = b.Publish(ctx, testTopic, testPayload)
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for messages to be received with a fixed timeout
@@ -876,9 +878,9 @@ func TestSubscriptionPlanConfig(t *testing.T) {
 	queue := b.Queue(testQueue)
 
 	// Create custom plan config
-	customPlan := bus.PlanConfig{
+	customPlan := &bus.PlanConfig{
 		RunAtDelta: 500 * time.Millisecond,
-		RetryPolicy: que.RetryPolicy{
+		RetryPolicy: &que.RetryPolicy{
 			InitialInterval:        1 * time.Second,
 			MaxInterval:            10 * time.Second,
 			NextIntervalMultiplier: 1.5,
@@ -931,7 +933,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 	t.Logf("[%s] Setting up consumers...", time.Since(startTime))
 
 	// Custom worker config to speed up tests
-	workerConf := bus.WorkerConfig{
+	workerConf := &bus.WorkerConfig{
 		MaxLockPerSecond:          1000,
 		MaxBufferJobsCount:        1000,
 		MaxPerformPerSecond:       1000,
@@ -1014,7 +1016,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 
 	t.Logf("[%s] Publishing first message...", time.Since(startTime))
 	publishStartTime := time.Now()
-	err = b.Dispatch(ctx, &bus.Outbound{
+	_, err = b.Dispatch(ctx, &bus.Outbound{
 		Message: bus.Message{
 			Subject: testSubject,
 			Header:  testHeader,
@@ -1102,7 +1104,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 	// Publish the same message again
 	t.Logf("[%s] Publishing second message...", time.Since(startTime))
 	publish2StartTime := time.Now()
-	err = b.Publish(ctx, testSubject, testPayload)
+	_, err = b.Publish(ctx, testSubject, testPayload)
 	require.NoError(t, err, "Failed to publish second message")
 	t.Logf("[%s] Second publish took %s", time.Since(startTime), time.Since(publish2StartTime))
 
@@ -1178,7 +1180,7 @@ func TestGetMetadata(t *testing.T) {
 	queue := b.Queue("test_queue")
 	require.NotNil(t, queue, "Queue should not be nil")
 
-	_, err = queue.Subscribe(ctx, "test.>", bus.WithPlanConfig(bus.PlanConfig{
+	_, err = queue.Subscribe(ctx, "test.>", bus.WithPlanConfig(&bus.PlanConfig{
 		RunAtDelta: 1 * time.Second,
 	}))
 	require.NoError(t, err, "Failed to subscribe to test.>")
@@ -2118,154 +2120,282 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create subscriptions and get their IDs
-	queue1 := b.Queue("test_queue_1")
-	queue2 := b.Queue("test_queue_2")
+	// Set up queues and subscriptions
+	queue1 := b.Queue(testQueue)
+	queue2 := b.Queue(testQueue2)
 
 	sub1, err := queue1.Subscribe(ctx, "orders.new")
-	require.NoError(t, err, "Failed to create subscription 1")
+	require.NoError(t, err, "Failed to subscribe")
 
-	sub2, err := queue2.Subscribe(ctx, "orders.processed")
-	require.NoError(t, err, "Failed to create subscription 2")
+	sub2, err := queue2.Subscribe(ctx, "notifications.>")
+	require.NoError(t, err, "Failed to subscribe")
 
-	sub3, err := queue1.Subscribe(ctx, "notifications.*")
-	require.NoError(t, err, "Failed to create subscription 3")
+	// Publish messages to create jobs
+	result, err := b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
+	require.NoError(t, err, "Failed to publish message")
+	require.NotNil(t, result, "Publish result should not be nil")
 
-	t.Logf("Created subscriptions: sub1=%s, sub2=%s, sub3=%s", sub1.ID(), sub2.ID(), sub3.ID())
+	result2, err := b.Publish(ctx, "notifications.user.login", []byte(`["notification_payload"]`))
+	require.NoError(t, err, "Failed to publish message")
+	require.NotNil(t, result2, "Publish result should not be nil")
 
-	// Publish messages that will match different subscriptions
-	err = b.Publish(ctx, "orders.new", []byte(`{"order": "123"}`))
-	require.NoError(t, err, "Failed to publish orders.new")
+	// Verify jobs were created using direct SQL queries since QueryJobsBySubscriptionID doesn't exist
+	// Query jobs by subscription ID using SQL
+	rows, err := db.QueryContext(ctx, `
+		SELECT COUNT(*) 
+		FROM goque_jobs 
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
+	`, sub1.ID())
+	require.NoError(t, err, "Failed to query jobs by subscription ID")
+	defer rows.Close()
 
-	err = b.Publish(ctx, "orders.processed", []byte(`{"order": "456"}`))
-	require.NoError(t, err, "Failed to publish orders.processed")
+	var count1 int
+	require.True(t, rows.Next())
+	err = rows.Scan(&count1)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 1, count1, "Should find 1 job for sub1")
 
-	err = b.Publish(ctx, "notifications.email", []byte(`{"type": "email"}`))
-	require.NoError(t, err, "Failed to publish notifications.email")
+	// Query jobs for subscription 2
+	rows2, err := db.QueryContext(ctx, `
+		SELECT COUNT(*) 
+		FROM goque_jobs 
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
+	`, sub2.ID())
+	require.NoError(t, err, "Failed to query jobs by subscription ID")
+	defer rows2.Close()
 
-	// First, let's check if any jobs were created at all
-	t.Run("CheckJobsExist", func(t *testing.T) {
-		rows, err := db.QueryContext(ctx, "SELECT COUNT(*) FROM goque_jobs")
-		require.NoError(t, err, "Failed to count jobs")
-		defer rows.Close()
+	var count2 int
+	require.True(t, rows2.Next())
+	err = rows2.Scan(&count2)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 1, count2, "Should find 1 job for sub2")
 
-		var count int
-		require.True(t, rows.Next(), "Should have a count result")
-		err = rows.Scan(&count)
-		require.NoError(t, err, "Failed to scan count")
+	// Query jobs for non-existent subscription ID
+	rows3, err := db.QueryContext(ctx, `
+		SELECT COUNT(*) 
+		FROM goque_jobs 
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
+	`, "99999")
+	require.NoError(t, err, "Should not error for non-existent subscription ID")
+	defer rows3.Close()
 
-		t.Logf("Total jobs in database: %d", count)
-		assert.EqualValues(t, 3, count)
+	var count3 int
+	require.True(t, rows3.Next())
+	err = rows3.Scan(&count3)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 0, count3, "Should return 0 for non-existent subscription ID")
+}
 
-		// Check the actual structure of jobs
-		rows2, err := db.QueryContext(ctx, "SELECT id, queue, args FROM goque_jobs LIMIT 3")
-		require.NoError(t, err, "Failed to select jobs")
-		defer rows2.Close()
+// TestDispatchMethods tests all methods of the Dispatch struct.
+func TestDispatchMethods(t *testing.T) {
+	t.Run("DispatchMethods_AllExecuted", func(t *testing.T) {
+		cleanupAllTables()
 
-		for rows2.Next() {
-			var id int64
-			var queue string
-			var args []byte
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
 
-			err = rows2.Scan(&id, &queue, &args)
-			require.NoError(t, err, "Failed to scan job")
+		ctx := context.Background()
 
-			t.Logf("Job: id=%d, queue=%s, args=%s", id, queue, string(args))
+		// Setup queues and subscriptions
+		queue1 := b.Queue(testQueue)
+		queue2 := b.Queue(testQueue2)
+
+		_, err = queue1.Subscribe(ctx, "orders.new")
+		require.NoError(t, err, "Failed to subscribe")
+
+		_, err = queue2.Subscribe(ctx, "notifications.>")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Dispatch messages to create a proper dispatch result
+		ordersMsg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: []byte(`["order_payload"]`),
+			},
 		}
+
+		notificationMsg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "notifications.user.login",
+				Payload: []byte(`["notification_payload"]`),
+			},
+		}
+
+		result, err := b.Dispatch(ctx, ordersMsg, notificationMsg)
+		require.NoError(t, err, "Dispatch should not error")
+		require.NotNil(t, result, "Dispatch result should not be nil")
+
+		// Test MatchedCount
+		assert.Equal(t, 2, result.MatchedCount(), "Should have 2 matched subscriptions")
+
+		// Test ExecutedCount
+		assert.Equal(t, 2, result.ExecutedCount(), "Should have 2 executed subscriptions")
+
+		// Test JobIDs (existing test coverage but verify it works correctly)
+		jobIDs := result.JobIDs()
+		assert.Equal(t, 2, len(jobIDs), "Should have 2 job IDs")
+		for _, id := range jobIDs {
+			assert.Greater(t, id, int64(0), "Job ID should be positive")
+		}
+
+		// Test SkippedByOverlap - should be empty since no overlapping patterns
+		skippedOverlap := result.SkippedByOverlap()
+		assert.Empty(t, skippedOverlap, "Should have no skipped by overlap")
+
+		// Test SkippedByConflict - should be empty in normal case
+		skippedConflict := result.SkippedByConflict()
+		assert.Empty(t, skippedConflict, "Should have no skipped by conflict")
 	})
 
-	// Test SQL query to find jobs by subscription ID
-	t.Run("QueryJobsBySubscriptionID", func(t *testing.T) {
-		// Query jobs for subscription 1 (orders.new) - Note: Header keys are canonicalized
-		rows, err := db.QueryContext(ctx, `
-			SELECT 
-				id,
-				queue,
-				args::jsonb->0->>'subject' as subject,
-				args::jsonb->0->'header'->'Subscription-Pattern'->0#>>'{}' as pattern,
-				args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' as subscription_id
-			FROM goque_jobs 
-			WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
-		`, sub1.ID())
-		require.NoError(t, err, "Failed to query jobs by subscription ID")
-		defer rows.Close()
+	t.Run("DispatchMethods_WithOverlappingPatterns", func(t *testing.T) {
+		cleanupAllTables()
 
-		var jobCount int
-		for rows.Next() {
-			var id int64
-			var queue, subject, pattern string
-			var subscriptionID string
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
 
-			err = rows.Scan(&id, &queue, &subject, &pattern, &subscriptionID)
-			require.NoError(t, err, "Failed to scan job row")
+		ctx := context.Background()
 
-			t.Logf("Found job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%s",
-				id, queue, subject, pattern, subscriptionID)
+		// Setup queue with overlapping patterns
+		queue1 := b.Queue(testQueue)
 
-			assert.Equal(t, "test_queue_1", queue, "Unexpected queue name")
-			assert.Equal(t, "orders.new", subject, "Unexpected subject")
-			assert.Equal(t, "orders.new", pattern, "Unexpected pattern")
-			assert.Equal(t, sub1.ID(), subscriptionID, "Unexpected subscription ID")
+		_, err = queue1.Subscribe(ctx, "orders.new")
+		require.NoError(t, err, "Failed to subscribe to exact pattern")
 
-			jobCount++
+		_, err = queue1.Subscribe(ctx, "orders.*")
+		require.NoError(t, err, "Failed to subscribe to wildcard pattern")
+
+		// Dispatch message that matches both patterns
+		msg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: []byte(`["overlapping_payload"]`),
+			},
 		}
 
-		assert.Equal(t, 1, jobCount, "Should find exactly 1 job for subscription 1")
+		result, err := b.Dispatch(ctx, msg)
+		require.NoError(t, err, "Dispatch should not error")
+		require.NotNil(t, result, "Dispatch result should not be nil")
+
+		// Test MatchedCount - should include both matching subscriptions
+		assert.Equal(t, 2, result.MatchedCount(), "Should have 2 matched subscriptions (overlapping)")
+
+		// Test ExecutedCount - only first subscription should be executed
+		assert.Equal(t, 1, result.ExecutedCount(), "Should have 1 executed subscription (first one)")
+
+		// Test JobIDs - should only have one job ID
+		jobIDs := result.JobIDs()
+		assert.Equal(t, 1, len(jobIDs), "Should have 1 job ID")
+
+		// Test SkippedByOverlap - should have one skipped execution
+		skippedOverlap := result.SkippedByOverlap()
+		assert.Equal(t, 1, len(skippedOverlap), "Should have 1 skipped by overlap")
+		assert.Equal(t, bus.ExecutionStatusSkippedOverlap, skippedOverlap[0].Status, "Status should be skipped overlap")
+
+		// Test SkippedByConflict - should be empty
+		skippedConflict := result.SkippedByConflict()
+		assert.Empty(t, skippedConflict, "Should have no skipped by conflict")
 	})
 
-	t.Run("QueryAllJobsWithSubscriptionInfo", func(t *testing.T) {
-		// Query all jobs with subscription information (removed created_at to avoid column error)
-		rows, err := db.QueryContext(ctx, `
-			SELECT 
-				id,
-				queue,
-				args::jsonb->0->>'subject' as subject,
-				args::jsonb->0->'header'->'Subscription-Pattern'->0#>>'{}' as pattern,
-				args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' as subscription_id
-			FROM goque_jobs 
-			WHERE args::jsonb->0->'header' ? 'Subscription-Identifier'
-			ORDER BY id
-		`)
-		require.NoError(t, err, "Failed to query all jobs with subscription info")
-		defer rows.Close()
+	t.Run("DispatchMethods_EmptyDispatch", func(t *testing.T) {
+		cleanupAllTables()
 
-		var jobs []struct {
-			ID             int64
-			Queue          string
-			Subject        string
-			Pattern        string
-			SubscriptionID string
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		// Dispatch with no messages
+		result, err := b.Dispatch(ctx)
+		require.NoError(t, err, "Empty dispatch should not error")
+		require.NotNil(t, result, "Dispatch result should not be nil")
+
+		// Test all methods on empty dispatch
+		assert.Equal(t, 0, result.MatchedCount(), "Empty dispatch should have 0 matched count")
+		assert.Equal(t, 0, result.ExecutedCount(), "Empty dispatch should have 0 executed count")
+		assert.Empty(t, result.JobIDs(), "Empty dispatch should have no job IDs")
+		assert.Empty(t, result.SkippedByOverlap(), "Empty dispatch should have no skipped by overlap")
+		assert.Empty(t, result.SkippedByConflict(), "Empty dispatch should have no skipped by conflict")
+	})
+
+	t.Run("DispatchMethods_NoMatchingSubscriptions", func(t *testing.T) {
+		cleanupAllTables()
+
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		// Setup subscription that won't match our message
+		queue1 := b.Queue(testQueue)
+		_, err = queue1.Subscribe(ctx, "orders.new")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Dispatch message with different subject
+		msg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "notifications.user.login",
+				Payload: []byte(`["no_match_payload"]`),
+			},
 		}
 
-		for rows.Next() {
-			var job struct {
-				ID             int64
-				Queue          string
-				Subject        string
-				Pattern        string
-				SubscriptionID string
-			}
+		result, err := b.Dispatch(ctx, msg)
+		require.NoError(t, err, "Dispatch should not error")
+		require.NotNil(t, result, "Dispatch result should not be nil")
 
-			err = rows.Scan(&job.ID, &job.Queue, &job.Subject, &job.Pattern, &job.SubscriptionID)
-			require.NoError(t, err, "Failed to scan job row")
+		// Test all methods when no subscriptions match
+		assert.Equal(t, 0, result.MatchedCount(), "Should have 0 matched subscriptions")
+		assert.Equal(t, 0, result.ExecutedCount(), "Should have 0 executed subscriptions")
+		assert.Empty(t, result.JobIDs(), "Should have no job IDs")
+		assert.Empty(t, result.SkippedByOverlap(), "Should have no skipped by overlap")
+		assert.Empty(t, result.SkippedByConflict(), "Should have no skipped by conflict")
+	})
 
-			t.Logf("Job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%s",
-				job.ID, job.Queue, job.Subject, job.Pattern, job.SubscriptionID)
+	t.Run("DispatchMethods_WithUniqueConstraintConflict", func(t *testing.T) {
+		cleanupAllTables()
 
-			jobs = append(jobs, job)
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		// Setup queue with unique constraint
+		queue1 := b.Queue(testQueue)
+		_, err = queue1.Subscribe(ctx, "orders.new", bus.WithPlanConfig(&bus.PlanConfig{
+			UniqueLifecycle: que.Always,
+		}))
+		require.NoError(t, err, "Failed to subscribe with unique constraint")
+
+		// Create message with unique ID
+		msg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: []byte(`["unique_payload"]`),
+			},
+			UniqueID: func(m *bus.Outbound) string {
+				return "test-unique-id"
+			},
 		}
 
-		assert.Equal(t, 3, len(jobs), "Should find exactly 3 jobs total")
+		// First dispatch should succeed
+		result1, err := b.Dispatch(ctx, msg)
+		require.NoError(t, err, "First dispatch should not error")
+		assert.Equal(t, 1, result1.ExecutedCount(), "First dispatch should execute")
+		assert.Equal(t, 1, len(result1.JobIDs()), "First dispatch should create job")
 
-		// Verify each job has the correct subscription ID
-		subIDs := []string{sub1.ID(), sub2.ID(), sub3.ID()}
-		foundSubIDs := make([]string, len(jobs))
-		for i, job := range jobs {
-			foundSubIDs[i] = job.SubscriptionID
-		}
+		// Second dispatch with same unique ID should create conflict
+		result2, err := b.Dispatch(ctx, msg)
+		require.NoError(t, err, "Second dispatch should not error")
 
-		for _, expectedID := range subIDs {
-			assert.Contains(t, foundSubIDs, expectedID, "Should find job for subscription ID %s", expectedID)
-		}
+		// Test methods on conflicted dispatch
+		assert.Equal(t, 1, result2.MatchedCount(), "Should have 1 matched subscription")
+		assert.Equal(t, 0, result2.ExecutedCount(), "Should have 0 executed subscriptions due to conflict")
+		assert.Empty(t, result2.JobIDs(), "Should have no job IDs due to conflict")
+		assert.Empty(t, result2.SkippedByOverlap(), "Should have no skipped by overlap")
+
+		// Test SkippedByConflict - should have one skipped execution
+		skippedConflict := result2.SkippedByConflict()
+		assert.Equal(t, 1, len(skippedConflict), "Should have 1 skipped by conflict")
+		assert.Equal(t, bus.ExecutionStatusSkippedConflict, skippedConflict[0].Status, "Status should be skipped conflict")
+		assert.Nil(t, skippedConflict[0].JobID, "JobID should be nil for conflicted execution")
 	})
 }

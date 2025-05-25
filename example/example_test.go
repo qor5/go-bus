@@ -155,7 +155,7 @@ func startCIAM(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitGroup
 	require.NoError(t, err, "Failed to marshal user data")
 
 	t.Log("CIAM creating new user in database")
-	err = b.Publish(ctx, SubjectIdentityCreated, userBytes, bus.WithUniqueID(newUser.ID))
+	_, err = b.Publish(ctx, SubjectIdentityCreated, userBytes, bus.WithUniqueID(newUser.ID))
 	require.NoError(t, err, "Failed to publish user creation event")
 
 	// User Information Update
@@ -168,7 +168,7 @@ func startCIAM(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitGroup
 	require.NoError(t, err, "Failed to marshal user update data")
 
 	t.Log("CIAM updating user information in database")
-	err = b.Publish(ctx, SubjectIdentityUpdated, updateBytes, bus.WithUniqueID(updatedUser.ID))
+	_, err = b.Publish(ctx, SubjectIdentityUpdated, updateBytes, bus.WithUniqueID(updatedUser.ID))
 	require.NoError(t, err, "Failed to publish user update event")
 
 	<-ctx.Done()
@@ -202,7 +202,7 @@ func startBusiness(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitG
 	defer func() { _ = consumer.Stop(context.Background()) }()
 	t.Logf("Business service consumer started")
 
-	_, err = businessQueue.Subscribe(ctx, SubjectIdentityCreated, bus.WithPlanConfig(bus.PlanConfig{
+	_, err = businessQueue.Subscribe(ctx, SubjectIdentityCreated, bus.WithPlanConfig(&bus.PlanConfig{
 		RetryPolicy:     bus.DefaultRetryPolicyFactory(),
 		RunAtDelta:      0,
 		UniqueLifecycle: que.Always,

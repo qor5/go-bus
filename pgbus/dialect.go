@@ -236,7 +236,7 @@ func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) 
 
 		sub.d = d
 
-		if err := json.Unmarshal(planData, &sub.plan); err != nil {
+		if err := json.Unmarshal(planData, &sub.planConfig); err != nil {
 			return nil, errors.Wrap(err, "failed to deserialize subscription plan")
 		}
 
@@ -470,7 +470,7 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 		if existingSub.pattern == pattern &&
 			existingSub.queue == queue &&
 			existingSub.regexPattern == regexPattern &&
-			opts.PlanConfig.Equal(existingSub.plan) &&
+			opts.PlanConfig.Equal(existingSub.planConfig) &&
 			compareTokens(existingSub.tokens, tokens) &&
 			ttlMilliseconds == existingSub.ttlMilliseconds {
 			return existingSub, nil
@@ -695,7 +695,7 @@ type subscription struct {
 	pattern         string
 	d               *Dialect
 	regexPattern    string
-	plan            bus.PlanConfig
+	planConfig      *bus.PlanConfig
 	createdAt       time.Time
 	updatedAt       time.Time
 	ttlMilliseconds int64                         // TTL in milliseconds, 0 means no expiration
@@ -719,8 +719,8 @@ func (s *subscription) Pattern() string {
 }
 
 // PlanConfig returns the plan configuration for this subscription.
-func (s *subscription) PlanConfig() bus.PlanConfig {
-	return s.plan
+func (s *subscription) PlanConfig() *bus.PlanConfig {
+	return s.planConfig
 }
 
 // Unsubscribe removes this subscription.

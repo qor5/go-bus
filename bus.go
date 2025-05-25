@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -21,12 +22,14 @@ type QueueImpl struct {
 
 // Subscribe registers the queue to receive messages published to subjects matching the pattern.
 func (q *QueueImpl) Subscribe(ctx context.Context, pattern string, opts ...SubscribeOption) (Subscription, error) {
-	subscribeOpts := &SubscribeOptions{
-		PlanConfig: DefaultPlanConfigFactory(),
-	}
+	subscribeOpts := &SubscribeOptions{}
 
 	for _, opt := range opts {
 		opt(subscribeOpts)
+	}
+
+	if subscribeOpts.PlanConfig == nil {
+		subscribeOpts.PlanConfig = DefaultPlanConfigFactory()
 	}
 
 	sub, err := q.b.dialect.Upsert(ctx, q.name, pattern, subscribeOpts)
@@ -46,12 +49,14 @@ func (q *QueueImpl) Subscriptions(ctx context.Context) ([]Subscription, error) {
 // The returned Consumer must be stopped by the caller when no longer needed.
 // The ctx parameter is only used to manage the startup process, not the Consumer's lifecycle.
 func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options ...ConsumeOption) (Consumer, error) {
-	opts := &ConsumeOptions{
-		WorkerConfig: DefaultWorkerConfigFactory(),
-	}
+	opts := &ConsumeOptions{}
 
 	for _, opt := range options {
 		opt(opts)
+	}
+
+	if opts.WorkerConfig == nil {
+		opts.WorkerConfig = DefaultWorkerConfigFactory()
 	}
 
 	workerOptions := que.WorkerOptions{
@@ -196,7 +201,7 @@ func (b *BusImpl) Queue(name string) Queue {
 }
 
 // Publish sends a payload to all queues with subscriptions matching the subject.
-func (b *BusImpl) Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) error {
+func (b *BusImpl) Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) (*Dispatch, error) {
 	publishOpts := &PublishOptions{}
 	for _, opt := range opts {
 		opt(publishOpts)
@@ -212,52 +217,73 @@ func (b *BusImpl) Publish(ctx context.Context, subject string, payload []byte, o
 	})
 }
 
+func descOfSubscription(sub Subscription) string {
+	return fmt.Sprintf("(queue: %s, pattern: %s, id: %s)", sub.Queue(), sub.Pattern(), sub.ID())
+}
+
 // Dispatch sends outbound messages to all queues with subscriptions matching the subject.
 // All messages are processed in a single transaction.
-func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) {
+func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (_ *Dispatch, xerr error) {
 	if len(msgs) == 0 {
-		return nil
+		return &Dispatch{
+			Executions: []*SubscriptionExecution{},
+		}, nil
 	}
 
-	var allPlans []que.Plan
+	now := time.Now()
 
+	var allExecutions []*SubscriptionExecution
 	for _, m := range msgs {
 		if err := ValidateSubject(m.Subject); err != nil {
-			return err
+			return nil, err
 		}
 
 		subscriptions, err := b.BySubject(ctx, m.Subject)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if len(subscriptions) == 0 {
 			continue
 		}
 
-		queuesSeen := make(map[string][]string)
+		queuesSeen := make(map[string][]Subscription)
 
 		var uniqueID *string
 		for _, sub := range subscriptions {
-			queueName := sub.Queue()
-			pattern := sub.Pattern()
+			execution := &SubscriptionExecution{
+				Subscription: sub,
+			}
+			allExecutions = append(allExecutions, execution)
 
-			queuesSeen[queueName] = append(queuesSeen[queueName], pattern)
+			queueName := sub.Queue()
+			queuesSeen[queueName] = append(queuesSeen[queueName], sub)
+			// Only execute the first subscription per queue (handle overlaps)
 			if len(queuesSeen[queueName]) > 1 {
+				execution.Status = ExecutionStatusSkippedOverlap
 				continue
 			}
 
+			execution.Status = ExecutionStatusExecuted
+
 			msgRaw, err := m.Message.ToRaw(sub)
 			if err != nil {
-				return errors.Wrap(err, "failed to convert message to raw format")
+				return nil, errors.Wrapf(err, "failed to convert message to raw format for subscription %s: %v", descOfSubscription(sub), m.Message)
 			}
 
 			planConfig := sub.PlanConfig()
+			if planConfig == nil {
+				return nil, errors.Errorf("plan config is required for subscription %s", descOfSubscription(sub))
+			}
+			var retryPolicy que.RetryPolicy
+			if planConfig.RetryPolicy != nil {
+				retryPolicy = *planConfig.RetryPolicy
+			}
 			plan := que.Plan{
 				Queue:           queueName,
 				Args:            que.Args(msgRaw),
-				RunAt:           time.Now().Add(planConfig.RunAtDelta),
-				RetryPolicy:     planConfig.RetryPolicy,
+				RunAt:           now.Add(planConfig.RunAtDelta),
+				RetryPolicy:     retryPolicy,
 				UniqueLifecycle: planConfig.UniqueLifecycle,
 			}
 
@@ -269,19 +295,24 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 					}
 					id := f(m)
 					if id == "" {
-						return errors.New("unique id is required")
+						return nil, errors.New("unique id is required")
 					}
 					uniqueID = &id
 				}
 				plan.UniqueID = uniqueID
 			}
 
-			allPlans = append(allPlans, plan)
+			execution.Plan = &plan
 		}
 
-		for queue, patterns := range queuesSeen {
-			if len(patterns) > 1 {
-				b.logger.Error("queue has overlapping patterns; only the first subscription will be triggered",
+		// Log overlap warnings
+		for queue, subs := range queuesSeen {
+			if len(subs) > 1 {
+				patterns := make([]string, len(subs))
+				for i, sub := range subs {
+					patterns[i] = sub.Pattern()
+				}
+				b.logger.Warn("queue has overlapping patterns; only the first subscription will be triggered",
 					"queue", queue,
 					"subject", m.Subject,
 					"patterns", patterns,
@@ -290,13 +321,22 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 		}
 	}
 
-	if len(allPlans) == 0 {
-		return nil
+	toBeExecuted := make([]*SubscriptionExecution, 0, len(allExecutions))
+	for _, execution := range allExecutions {
+		if execution.Status == ExecutionStatusExecuted {
+			toBeExecuted = append(toBeExecuted, execution)
+		}
+	}
+
+	if len(toBeExecuted) == 0 {
+		return &Dispatch{
+			Executions: allExecutions,
+		}, nil
 	}
 
 	tx, err := b.dialect.BeginTx(ctx, nil)
 	if err != nil {
-		return errors.Wrap(err, "failed to begin transaction")
+		return nil, errors.Wrap(err, "failed to begin transaction")
 	}
 
 	panicked := true
@@ -314,29 +354,47 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 
 		ctx := que.WithSkipConflict(ctx)
 		goq := b.dialect.GoQue()
-		for i := 0; i < len(allPlans); i += batchSize {
+		for i := 0; i < len(toBeExecuted); i += batchSize {
 			end := i + batchSize
-			if end > len(allPlans) {
-				end = len(allPlans)
+			if end > len(toBeExecuted) {
+				end = len(toBeExecuted)
+			}
+			batch := toBeExecuted[i:end]
+
+			plans := make([]que.Plan, len(batch))
+			for j, execution := range batch {
+				plans[j] = *execution.Plan
 			}
 
-			batch := allPlans[i:end]
-			if _, err := goq.Enqueue(ctx, tx, batch...); err != nil {
+			jobIDs, err := goq.Enqueue(ctx, tx, plans...)
+			if err != nil {
 				return errors.Wrap(err, "failed to enqueue jobs batch")
+			}
+
+			for j, execution := range batch {
+				jobID := jobIDs[j]
+				if jobID != que.SkippedConflictID {
+					execution.JobID = &jobID
+				} else {
+					execution.Status = ExecutionStatusSkippedConflict
+					execution.JobID = nil
+				}
 			}
 		}
 		return nil
 	}()
 	panicked = false
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err = tx.Commit(); err != nil {
-		return errors.Wrap(err, "failed to commit transaction")
+		return nil, errors.Wrap(err, "failed to commit transaction")
 	}
 
-	return nil
+	return &Dispatch{
+		Executions: allExecutions,
+	}, nil
 }
 
 // BySubject returns all subscriptions with patterns matching the given subject.

@@ -6,7 +6,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.2
 	github.com/dgraph-io/ristretto/v2 v2.2.0
 	github.com/pkg/errors v0.9.1
-	github.com/qor5/go-que v1.0.0
+	github.com/qor5/go-que v1.1.0
 	github.com/rs/xid v1.6.0
 	github.com/stretchr/testify v1.10.0
 	github.com/theplant/testenv v0.1.0
@@ -72,7 +72,7 @@ require (
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
-	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect
+	golang.org/x/time v0.11.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/postgres v1.5.7 // indirect
 	gorm.io/gorm v1.25.10 // indirect

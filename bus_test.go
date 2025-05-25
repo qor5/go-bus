@@ -415,7 +415,7 @@ func TestPublish(t *testing.T) {
 		assert.Equal(t, "orders.item123.processed", msg.Subject, "Message subject mismatch")
 		assert.Equal(t, []byte(`["wildcard_payload"]`), msg.Payload, "Message payload mismatch")
 		// Verify pattern is set
-		assert.Contains(t, msg.Pattern, "orders.*", "Message pattern should contain the matching pattern")
+		assert.Contains(t, msg.Header.Get(bus.HeaderSubscriptionPattern), "orders.*", "Message pattern should contain the matching pattern")
 	})
 
 	t.Run("MultiLevelWildcardMatch", func(t *testing.T) {
@@ -436,7 +436,7 @@ func TestPublish(t *testing.T) {
 		assert.Equal(t, "notifications.user.login", msg.Subject, "Message subject mismatch")
 		assert.Equal(t, []byte(`["multilevel_payload"]`), msg.Payload, "Message payload mismatch")
 		// Verify pattern is set
-		assert.Equal(t, "notifications.>", msg.Pattern, "Message pattern should be the matching pattern")
+		assert.Equal(t, "notifications.>", msg.Header.Get(bus.HeaderSubscriptionPattern), "Message pattern should be the matching pattern")
 	})
 
 	// Test Dispatch API
@@ -1037,7 +1037,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		assert.Equal(t, testSubject, msg.Subject, "Message subject mismatch in queue1")
 		assert.Equal(t, testPayload, msg.Payload, "Message payload mismatch in queue1")
 		assert.Equal(t, "application/json", msg.Header.Get("Content-Type"), "Header mismatch in queue1")
-		assert.Equal(t, "event.*.created", msg.Pattern, "Pattern mismatch in queue1")
+		assert.Equal(t, "event.*.created", msg.Header.Get(bus.HeaderSubscriptionPattern), "Pattern mismatch in queue1")
 	case <-ctx.Done():
 		t.Fatal("Timed out waiting for message in queue1")
 	}
@@ -1051,7 +1051,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		assert.Equal(t, testSubject, msg.Subject, "Message subject mismatch in queue2")
 		assert.Equal(t, testPayload, msg.Payload, "Message payload mismatch in queue2")
 		assert.Equal(t, "application/json", msg.Header.Get("Content-Type"), "Header mismatch in queue2")
-		assert.Equal(t, "event.user.*", msg.Pattern, "Pattern mismatch in queue2")
+		assert.Equal(t, "event.user.*", msg.Header.Get(bus.HeaderSubscriptionPattern), "Pattern mismatch in queue2")
 	case <-ctx.Done():
 		t.Fatal("Timed out waiting for message in queue2")
 	}
@@ -1065,7 +1065,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		assert.Equal(t, testSubject, msg.Subject, "Message subject mismatch in queue3")
 		assert.Equal(t, testPayload, msg.Payload, "Message payload mismatch in queue3")
 		assert.Equal(t, "application/json", msg.Header.Get("Content-Type"), "Header mismatch in queue3")
-		assert.Equal(t, "event.>", msg.Pattern, "Pattern mismatch in queue3")
+		assert.Equal(t, "event.>", msg.Header.Get(bus.HeaderSubscriptionPattern), "Pattern mismatch in queue3")
 	case <-ctx.Done():
 		t.Fatal("Timed out waiting for message in queue3")
 	}
@@ -2106,5 +2106,166 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 		// Verify results are equivalent
 		assert.Equal(t, subs1[0].ID(), subs2[0].ID(), "Cached result should match original")
 		assert.Equal(t, subs1[0].Pattern(), subs2[0].Pattern(), "Cached pattern should match")
+	})
+}
+
+// TestQueryJobsBySubscriptionID tests querying jobs by subscription ID from header
+func TestQueryJobsBySubscriptionID(t *testing.T) {
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	// Create subscriptions and get their IDs
+	queue1 := b.Queue("test_queue_1")
+	queue2 := b.Queue("test_queue_2")
+
+	sub1, err := queue1.Subscribe(ctx, "orders.new")
+	require.NoError(t, err, "Failed to create subscription 1")
+
+	sub2, err := queue2.Subscribe(ctx, "orders.processed")
+	require.NoError(t, err, "Failed to create subscription 2")
+
+	sub3, err := queue1.Subscribe(ctx, "notifications.*")
+	require.NoError(t, err, "Failed to create subscription 3")
+
+	t.Logf("Created subscriptions: sub1=%d, sub2=%d, sub3=%d", sub1.ID(), sub2.ID(), sub3.ID())
+
+	// Publish messages that will match different subscriptions
+	err = b.Publish(ctx, "orders.new", []byte(`{"order": "123"}`))
+	require.NoError(t, err, "Failed to publish orders.new")
+
+	err = b.Publish(ctx, "orders.processed", []byte(`{"order": "456"}`))
+	require.NoError(t, err, "Failed to publish orders.processed")
+
+	err = b.Publish(ctx, "notifications.email", []byte(`{"type": "email"}`))
+	require.NoError(t, err, "Failed to publish notifications.email")
+
+	// First, let's check if any jobs were created at all
+	t.Run("CheckJobsExist", func(t *testing.T) {
+		rows, err := db.QueryContext(ctx, "SELECT COUNT(*) FROM goque_jobs")
+		require.NoError(t, err, "Failed to count jobs")
+		defer rows.Close()
+
+		var count int
+		require.True(t, rows.Next(), "Should have a count result")
+		err = rows.Scan(&count)
+		require.NoError(t, err, "Failed to scan count")
+
+		t.Logf("Total jobs in database: %d", count)
+		assert.EqualValues(t, 3, count)
+
+		// Check the actual structure of jobs
+		rows2, err := db.QueryContext(ctx, "SELECT id, queue, args FROM goque_jobs LIMIT 3")
+		require.NoError(t, err, "Failed to select jobs")
+		defer rows2.Close()
+
+		for rows2.Next() {
+			var id int64
+			var queue string
+			var args []byte
+
+			err = rows2.Scan(&id, &queue, &args)
+			require.NoError(t, err, "Failed to scan job")
+
+			t.Logf("Job: id=%d, queue=%s, args=%s", id, queue, string(args))
+		}
+	})
+
+	// Test SQL query to find jobs by subscription ID
+	t.Run("QueryJobsBySubscriptionID", func(t *testing.T) {
+		// Query jobs for subscription 1 (orders.new) - Note: Header keys are canonicalized
+		rows, err := db.QueryContext(ctx, `
+			SELECT 
+				id,
+				queue,
+				args::jsonb->0->>'subject' as subject,
+				args::jsonb->0->'header'->'Subscription-Pattern'->0#>>'{}' as pattern,
+				(args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}')::bigint as subscription_id
+			FROM goque_jobs 
+			WHERE (args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}')::bigint = $1
+		`, sub1.ID())
+		require.NoError(t, err, "Failed to query jobs by subscription ID")
+		defer rows.Close()
+
+		var jobCount int
+		for rows.Next() {
+			var id int64
+			var queue, subject, pattern string
+			var subscriptionID int64
+
+			err = rows.Scan(&id, &queue, &subject, &pattern, &subscriptionID)
+			require.NoError(t, err, "Failed to scan job row")
+
+			t.Logf("Found job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%d",
+				id, queue, subject, pattern, subscriptionID)
+
+			assert.Equal(t, "test_queue_1", queue, "Unexpected queue name")
+			assert.Equal(t, "orders.new", subject, "Unexpected subject")
+			assert.Equal(t, "orders.new", pattern, "Unexpected pattern")
+			assert.Equal(t, sub1.ID(), subscriptionID, "Unexpected subscription ID")
+
+			jobCount++
+		}
+
+		assert.Equal(t, 1, jobCount, "Should find exactly 1 job for subscription 1")
+	})
+
+	t.Run("QueryAllJobsWithSubscriptionInfo", func(t *testing.T) {
+		// Query all jobs with subscription information (removed created_at to avoid column error)
+		rows, err := db.QueryContext(ctx, `
+			SELECT 
+				id,
+				queue,
+				args::jsonb->0->>'subject' as subject,
+				args::jsonb->0->'header'->'Subscription-Pattern'->0#>>'{}' as pattern,
+				(args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}')::bigint as subscription_id
+			FROM goque_jobs 
+			WHERE args::jsonb->0->'header' ? 'Subscription-Identifier'
+			ORDER BY id
+		`)
+		require.NoError(t, err, "Failed to query all jobs with subscription info")
+		defer rows.Close()
+
+		var jobs []struct {
+			ID             int64
+			Queue          string
+			Subject        string
+			Pattern        string
+			SubscriptionID int64
+		}
+
+		for rows.Next() {
+			var job struct {
+				ID             int64
+				Queue          string
+				Subject        string
+				Pattern        string
+				SubscriptionID int64
+			}
+
+			err = rows.Scan(&job.ID, &job.Queue, &job.Subject, &job.Pattern, &job.SubscriptionID)
+			require.NoError(t, err, "Failed to scan job row")
+
+			t.Logf("Job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%d",
+				job.ID, job.Queue, job.Subject, job.Pattern, job.SubscriptionID)
+
+			jobs = append(jobs, job)
+		}
+
+		assert.Equal(t, 3, len(jobs), "Should find exactly 3 jobs total")
+
+		// Verify each job has the correct subscription ID
+		subIDs := []int64{sub1.ID(), sub2.ID(), sub3.ID()}
+		foundSubIDs := make([]int64, len(jobs))
+		for i, job := range jobs {
+			foundSubIDs[i] = job.SubscriptionID
+		}
+
+		for _, expectedID := range subIDs {
+			assert.Contains(t, foundSubIDs, expectedID, "Should find job for subscription ID %d", expectedID)
+		}
 	})
 }

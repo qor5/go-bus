@@ -17,6 +17,12 @@ import (
 	"github.com/qor5/go-que"
 )
 
+// Header constants for message metadata
+const (
+	HeaderSubscriptionPattern    = "Subscription-Pattern"    // The subscription pattern that matched this message
+	HeaderSubscriptionIdentifier = "Subscription-Identifier" // The subscription identifier that received this message
+)
+
 // Subscription represents an active subscription to a subject pattern.
 type Subscription interface {
 	// ID returns the unique identifier of the subscription.
@@ -53,10 +59,10 @@ type Message struct {
 	Subject string `json:"subject"`
 
 	// Header is the header of the message.
-	Header Header `json:"header,omitempty"`
+	Header Header `json:"header"`
 
 	// Payload is the actual content of the message.
-	Payload []byte `json:"payload,omitempty"`
+	Payload []byte `json:"payload"`
 }
 
 type Outbound struct {
@@ -74,9 +80,6 @@ type Inbound struct {
 
 	// Message is the message content.
 	Message
-
-	// Pattern is the pattern this message matches against.
-	Pattern string `json:"pattern"`
 }
 
 // Handler represents a function that processes messages.

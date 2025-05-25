@@ -60,12 +60,11 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 		MaxLockPerSecond:   opts.WorkerConfig.MaxLockPerSecond,
 		MaxBufferJobsCount: opts.WorkerConfig.MaxBufferJobsCount,
 		Perform: func(ctx context.Context, job que.Job) error {
-			inboundMsg, err := InboundFromArgs(job.Plan().Args)
+			inbound, err := InboundFromJob(job)
 			if err != nil {
 				return err
 			}
-			inboundMsg.Job = job
-			return handler(ctx, inboundMsg)
+			return handler(ctx, inbound)
 		},
 		MaxPerformPerSecond:       opts.WorkerConfig.MaxPerformPerSecond,
 		MaxConcurrentPerformCount: opts.WorkerConfig.MaxConcurrentPerformCount,
@@ -236,7 +235,6 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 			continue
 		}
 
-		msgRaw := m.Message.ToRaw()
 		queuesSeen := make(map[string][]string)
 
 		var uniqueID *string
@@ -249,11 +247,15 @@ func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (xerr error) 
 				continue
 			}
 
-			planConfig := sub.PlanConfig()
+			msgRaw, err := m.Message.ToRaw(sub)
+			if err != nil {
+				return errors.Wrap(err, "failed to convert message to raw format")
+			}
 
+			planConfig := sub.PlanConfig()
 			plan := que.Plan{
 				Queue:           queueName,
-				Args:            ArgsFromMessageRaw(msgRaw, pattern),
+				Args:            que.Args(msgRaw),
 				RunAt:           time.Now().Add(planConfig.RunAtDelta),
 				RetryPolicy:     planConfig.RetryPolicy,
 				UniqueLifecycle: planConfig.UniqueLifecycle,

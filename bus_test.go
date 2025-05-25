@@ -223,8 +223,8 @@ func TestSubscriptionManagement(t *testing.T) {
 		require.NoError(t, err, "Subscription update with PlanConfig should succeed")
 		require.NotNil(t, sub3, "Updated subscription should not be nil")
 
-		// Verify same subscription ID (still an update, not a new subscription)
-		assert.Equal(t, initialID, sub3.ID(), "Subscription ID should remain the same after PlanConfig update")
+		// Verify new subscription ID (delete-and-recreate creates new record)
+		assert.NotEqual(t, initialID, sub3.ID(), "Subscription ID should be new after PlanConfig update (delete-and-recreate)")
 
 		// Verify PlanConfig was updated
 		updatedConfig := sub3.PlanConfig()
@@ -1901,8 +1901,8 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 
 		newID := sub2.ID()
 
-		// Should be the same subscription ID (revived, not newly created)
-		assert.Equal(t, originalID, newID, "Should revive existing subscription, not create new one")
+		// Should be a new subscription ID (delete-and-recreate creates new record)
+		assert.NotEqual(t, originalID, newID, "Should create new subscription (delete-and-recreate strategy)")
 
 		// Revived subscription should be visible
 		subs, err = queue.Subscriptions(ctx)

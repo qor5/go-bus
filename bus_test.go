@@ -2131,7 +2131,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 	sub3, err := queue1.Subscribe(ctx, "notifications.*")
 	require.NoError(t, err, "Failed to create subscription 3")
 
-	t.Logf("Created subscriptions: sub1=%d, sub2=%d, sub3=%d", sub1.ID(), sub2.ID(), sub3.ID())
+	t.Logf("Created subscriptions: sub1=%s, sub2=%s, sub3=%s", sub1.ID(), sub2.ID(), sub3.ID())
 
 	// Publish messages that will match different subscriptions
 	err = b.Publish(ctx, "orders.new", []byte(`{"order": "123"}`))
@@ -2183,9 +2183,9 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 				queue,
 				args::jsonb->0->>'subject' as subject,
 				args::jsonb->0->'header'->'Subscription-Pattern'->0#>>'{}' as pattern,
-				(args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}')::bigint as subscription_id
+				args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' as subscription_id
 			FROM goque_jobs 
-			WHERE (args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}')::bigint = $1
+			WHERE args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' = $1
 		`, sub1.ID())
 		require.NoError(t, err, "Failed to query jobs by subscription ID")
 		defer rows.Close()
@@ -2194,12 +2194,12 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 		for rows.Next() {
 			var id int64
 			var queue, subject, pattern string
-			var subscriptionID int64
+			var subscriptionID string
 
 			err = rows.Scan(&id, &queue, &subject, &pattern, &subscriptionID)
 			require.NoError(t, err, "Failed to scan job row")
 
-			t.Logf("Found job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%d",
+			t.Logf("Found job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%s",
 				id, queue, subject, pattern, subscriptionID)
 
 			assert.Equal(t, "test_queue_1", queue, "Unexpected queue name")
@@ -2221,7 +2221,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 				queue,
 				args::jsonb->0->>'subject' as subject,
 				args::jsonb->0->'header'->'Subscription-Pattern'->0#>>'{}' as pattern,
-				(args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}')::bigint as subscription_id
+				args::jsonb->0->'header'->'Subscription-Identifier'->0#>>'{}' as subscription_id
 			FROM goque_jobs 
 			WHERE args::jsonb->0->'header' ? 'Subscription-Identifier'
 			ORDER BY id
@@ -2234,7 +2234,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 			Queue          string
 			Subject        string
 			Pattern        string
-			SubscriptionID int64
+			SubscriptionID string
 		}
 
 		for rows.Next() {
@@ -2243,13 +2243,13 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 				Queue          string
 				Subject        string
 				Pattern        string
-				SubscriptionID int64
+				SubscriptionID string
 			}
 
 			err = rows.Scan(&job.ID, &job.Queue, &job.Subject, &job.Pattern, &job.SubscriptionID)
 			require.NoError(t, err, "Failed to scan job row")
 
-			t.Logf("Job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%d",
+			t.Logf("Job: id=%d, queue=%s, subject=%s, pattern=%s, subscriptionID=%s",
 				job.ID, job.Queue, job.Subject, job.Pattern, job.SubscriptionID)
 
 			jobs = append(jobs, job)
@@ -2258,14 +2258,14 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 		assert.Equal(t, 3, len(jobs), "Should find exactly 3 jobs total")
 
 		// Verify each job has the correct subscription ID
-		subIDs := []int64{sub1.ID(), sub2.ID(), sub3.ID()}
-		foundSubIDs := make([]int64, len(jobs))
+		subIDs := []string{sub1.ID(), sub2.ID(), sub3.ID()}
+		foundSubIDs := make([]string, len(jobs))
 		for i, job := range jobs {
 			foundSubIDs[i] = job.SubscriptionID
 		}
 
 		for _, expectedID := range subIDs {
-			assert.Contains(t, foundSubIDs, expectedID, "Should find job for subscription ID %d", expectedID)
+			assert.Contains(t, foundSubIDs, expectedID, "Should find job for subscription ID %s", expectedID)
 		}
 	})
 }

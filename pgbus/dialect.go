@@ -704,8 +704,8 @@ type subscription struct {
 }
 
 // ID returns the unique identifier of the subscription.
-func (s *subscription) ID() int64 {
-	return s.id
+func (s *subscription) ID() string {
+	return fmt.Sprintf("%d", s.id)
 }
 
 // Queue returns the name of the queue that receives messages.

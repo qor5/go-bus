@@ -4,7 +4,6 @@ package bus
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/pkg/errors"
@@ -20,7 +19,7 @@ func (m *Message) ToRaw(sub Subscription) (json.RawMessage, error) {
 		}
 	}
 	hdr.Set(HeaderSubscriptionPattern, sub.Pattern())
-	hdr.Set(HeaderSubscriptionIdentifier, fmt.Sprintf("%d", sub.ID()))
+	hdr.Set(HeaderSubscriptionIdentifier, sub.ID())
 
 	v := struct {
 		*Message

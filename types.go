@@ -23,34 +23,6 @@ const (
 	HeaderSubscriptionIdentifier = "Subscription-Identifier" // The subscription identifier that received this message
 )
 
-// Subscription represents an active subscription to a subject pattern.
-type Subscription interface {
-	// ID returns the unique identifier of the subscription.
-	ID() int64
-
-	// Queue returns the name of the queue that receives messages.
-	Queue() string
-
-	// Pattern returns the subject pattern this subscription matches against.
-	Pattern() string
-
-	// PlanConfig returns the plan configuration for this subscription.
-	PlanConfig() PlanConfig
-
-	// Unsubscribe removes this subscription.
-	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
-	// This is because go-bus is designed to support offline messages.
-	Unsubscribe(ctx context.Context) error
-
-	// Heartbeat updates the heartbeat timestamp for this subscription.
-	// This method should be called periodically to prevent TTL-based cleanup.
-	Heartbeat(ctx context.Context) error
-
-	// ExpiresAt returns the expiration time for this subscription.
-	// Returns zero time if the subscription never expires (no TTL).
-	ExpiresAt() time.Time
-}
-
 type Header = http.Header
 
 // Message represents a message in the publish-subscribe system.
@@ -75,11 +47,11 @@ type Outbound struct {
 }
 
 type Inbound struct {
-	// Job is the job that received the message.
-	que.Job `json:"-"`
-
 	// Message is the message content.
 	Message
+
+	// Job is the job that received the message.
+	que.Job `json:"-"`
 }
 
 // Handler represents a function that processes messages.
@@ -124,4 +96,32 @@ type Bus interface {
 	// CleanupExpiredSubscriptions removes subscriptions that have exceeded their TTL.
 	// Returns the number of subscriptions that were cleaned up.
 	CleanupExpiredSubscriptions(ctx context.Context) (int64, error)
+}
+
+// Subscription represents an active subscription to a subject pattern.
+type Subscription interface {
+	// ID returns the unique identifier of the subscription.
+	ID() string
+
+	// Queue returns the name of the queue that receives messages.
+	Queue() string
+
+	// Pattern returns the subject pattern this subscription matches against.
+	Pattern() string
+
+	// PlanConfig returns the plan configuration for this subscription.
+	PlanConfig() PlanConfig
+
+	// Unsubscribe removes this subscription.
+	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
+	// This is because go-bus is designed to support offline messages.
+	Unsubscribe(ctx context.Context) error
+
+	// Heartbeat updates the heartbeat timestamp for this subscription.
+	// This method should be called periodically to prevent TTL-based cleanup.
+	Heartbeat(ctx context.Context) error
+
+	// ExpiresAt returns the expiration time for this subscription.
+	// Returns zero time if the subscription never expires (no TTL).
+	ExpiresAt() time.Time
 }

@@ -521,7 +521,12 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error
 	).Scan(&optionsData)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return errors.Wrap(bus.ErrSubscriptionNotFound, "subscription not found")
+			// For idempotent behavior, deletion of non-existent subscription should succeed
+			// No need to update metadata since no actual changes occurred
+			if err = tx.Commit(); err != nil {
+				return errors.Wrap(err, "failed to commit transaction")
+			}
+			return nil
 		}
 		return errors.Wrap(err, "failed to soft delete subscription")
 	}

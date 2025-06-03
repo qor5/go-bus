@@ -3,6 +3,7 @@ package bus_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -29,19 +30,30 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	// Ensure all potentially existing dependent tables are cleaned up before tests start
+	// Initialize database schema directly - Migrate handles tables that may already exist
+	ctx := context.Background()
+	if err := pgbus.Migrate(ctx, db); err != nil {
+		panic(fmt.Sprintf("Failed to migrate database: %v", err))
+	}
+
+	// Clear all data while preserving table structure
 	cleanupAllTables()
 
 	m.Run()
 }
 
-// cleanupAllTables safely drops all test-related tables with CASCADE option
-// to handle any dependencies. Errors are intentionally ignored as tables
-// might not exist during first run.
+// cleanupAllTables clears all data from tables without dropping table structure,
+// which improves test efficiency by avoiding repeated schema creation
 func cleanupAllTables() {
-	// Safely drop tables, ignoring errors for non-existent tables
-	_, _ = db.Exec("DROP TABLE IF EXISTS goque_jobs CASCADE")
-	_, _ = db.Exec("DROP TABLE IF EXISTS gobus_subscriptions CASCADE")
+	// Clear data while preserving table structure
+	_, _ = db.Exec("DELETE FROM goque_jobs")
+	_, _ = db.Exec("DELETE FROM gobus_subscriptions")
+	_, _ = db.Exec("DELETE FROM gobus_metadata")
+
+	// Restore initial metadata record to ensure consistent test environment
+	_, _ = db.Exec("INSERT INTO gobus_metadata (version, updated_at, total_subscriptions) " +
+		"SELECT 1, NOW(), 0 " +
+		"WHERE NOT EXISTS (SELECT 1 FROM gobus_metadata)")
 }
 
 // Define multiple test queue names
@@ -195,9 +207,9 @@ func TestSubscriptionManagement(t *testing.T) {
 		assert.Equal(t, 1, len(subs), "Should still have only one subscription")
 
 		// Test PlanConfig update
-		customPlan := bus.PlanConfig{
+		customPlan := &bus.PlanConfig{
 			RunAtDelta: 200 * time.Millisecond,
-			RetryPolicy: que.RetryPolicy{
+			RetryPolicy: &que.RetryPolicy{
 				InitialInterval:        2 * time.Second,
 				MaxInterval:            20 * time.Second,
 				NextIntervalMultiplier: 2.0,
@@ -211,8 +223,8 @@ func TestSubscriptionManagement(t *testing.T) {
 		require.NoError(t, err, "Subscription update with PlanConfig should succeed")
 		require.NotNil(t, sub3, "Updated subscription should not be nil")
 
-		// Verify same subscription ID (still an update, not a new subscription)
-		assert.Equal(t, initialID, sub3.ID(), "Subscription ID should remain the same after PlanConfig update")
+		// Verify new subscription ID (delete-and-recreate creates new record)
+		assert.NotEqual(t, initialID, sub3.ID(), "Subscription ID should be new after PlanConfig update (delete-and-recreate)")
 
 		// Verify PlanConfig was updated
 		updatedConfig := sub3.PlanConfig()
@@ -369,8 +381,10 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		err = b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
+		result, err := b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
 		assert.NoError(t, err, "Valid publish should not error")
+		assert.NotNil(t, result, "Publish result should not be nil")
+		assert.Greater(t, len(result.JobIDs()), 0, "Should create at least one job")
 
 		// Verify jobs were created - should create 1 jobs (for "orders.new")
 		jobs := getQueueJobs(t, testQueue)
@@ -389,7 +403,7 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		err = b.Publish(ctx, "orders.item123.processed", []byte(`["wildcard_payload"]`))
+		_, err = b.Publish(ctx, "orders.item123.processed", []byte(`["wildcard_payload"]`))
 		assert.NoError(t, err, "Wildcard match publish should not error")
 
 		// Verify jobs were created - should create 1 job in queue1
@@ -403,14 +417,14 @@ func TestPublish(t *testing.T) {
 		assert.Equal(t, "orders.item123.processed", msg.Subject, "Message subject mismatch")
 		assert.Equal(t, []byte(`["wildcard_payload"]`), msg.Payload, "Message payload mismatch")
 		// Verify pattern is set
-		assert.Contains(t, msg.Pattern, "orders.*", "Message pattern should contain the matching pattern")
+		assert.Contains(t, msg.Header.Get(bus.HeaderSubscriptionPattern), "orders.*", "Message pattern should contain the matching pattern")
 	})
 
 	t.Run("MultiLevelWildcardMatch", func(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		err = b.Publish(ctx, "notifications.user.login", []byte(`["multilevel_payload"]`))
+		_, err = b.Publish(ctx, "notifications.user.login", []byte(`["multilevel_payload"]`))
 		assert.NoError(t, err, "Multi-level wildcard match publish should not error")
 
 		// Verify jobs were created - should create 1 job in queue2
@@ -424,7 +438,7 @@ func TestPublish(t *testing.T) {
 		assert.Equal(t, "notifications.user.login", msg.Subject, "Message subject mismatch")
 		assert.Equal(t, []byte(`["multilevel_payload"]`), msg.Payload, "Message payload mismatch")
 		// Verify pattern is set
-		assert.Equal(t, "notifications.>", msg.Pattern, "Message pattern should be the matching pattern")
+		assert.Equal(t, "notifications.>", msg.Header.Get(bus.HeaderSubscriptionPattern), "Message pattern should be the matching pattern")
 	})
 
 	// Test Dispatch API
@@ -440,7 +454,7 @@ func TestPublish(t *testing.T) {
 			},
 		}
 
-		err = b.Dispatch(ctx, outbound)
+		_, err = b.Dispatch(ctx, outbound)
 		assert.NoError(t, err, "Valid Dispatch should not error")
 
 		// Verify jobs were created - should create 1 jobs (for "orders.new")
@@ -488,7 +502,7 @@ func TestPublish(t *testing.T) {
 		}
 
 		// Dispatch multiple messages in a single call
-		err = b.Dispatch(ctx, ordersMsg, notificationMsg, orderProcessedMsg)
+		_, err = b.Dispatch(ctx, ordersMsg, notificationMsg, orderProcessedMsg)
 		assert.NoError(t, err, "Batch Dispatch should not error")
 
 		// Verify jobs were created in queue1 (should have orders.new and orders.*.processed)
@@ -533,7 +547,7 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Dispatch with empty slice should not error
-		err = b.Dispatch(ctx)
+		_, err = b.Dispatch(ctx)
 		assert.NoError(t, err, "Empty Dispatch should not error")
 
 		// Verify no jobs were created
@@ -564,7 +578,7 @@ func TestPublish(t *testing.T) {
 		}
 
 		// Dispatch should fail with invalid message
-		err = b.Dispatch(ctx, validMsg, invalidMsg)
+		_, err = b.Dispatch(ctx, validMsg, invalidMsg)
 		assert.Error(t, err, "Batch Dispatch with invalid message should error")
 
 		// Verify no jobs were created due to transaction rollback
@@ -577,7 +591,7 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Depending on the implementation, this may or may not return an error
-		_ = b.Publish(ctx, "unknown.topic", []byte(`["test_payload"]`))
+		_, _ = b.Publish(ctx, "unknown.topic", []byte(`["test_payload"]`))
 
 		// Verify no jobs were created
 		queue1Jobs := getQueueJobs(t, testQueue)
@@ -591,7 +605,7 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Depending on the implementation, this may or may not return an error
-		err = b.Publish(ctx, "orders.new", []byte{})
+		_, err = b.Publish(ctx, "orders.new", []byte{})
 		// Log errors if they occur, but don't assert error expectations
 		if err != nil {
 			t.Logf("Publish with empty payload returned: %v", err)
@@ -669,7 +683,7 @@ func TestConsume(t *testing.T) {
 		"Content-Type":    []string{"application/json"},
 		"x-custom-HEADER": []string{"value"},
 	}
-	err = b.Publish(ctx, "test.topic", testPayload, bus.WithHeader(testHeader))
+	_, err = b.Publish(ctx, "test.topic", testPayload, bus.WithHeader(testHeader))
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for message or timeout
@@ -702,7 +716,7 @@ func TestConsumeWithOptions(t *testing.T) {
 	msgCh := make(chan *bus.Inbound, 1)
 
 	// Custom worker config
-	workerConfig := bus.WorkerConfig{
+	workerConfig := &bus.WorkerConfig{
 		MaxLockPerSecond:          5,
 		MaxBufferJobsCount:        10,
 		MaxPerformPerSecond:       5,
@@ -719,7 +733,7 @@ func TestConsumeWithOptions(t *testing.T) {
 
 	// Publish a message
 	testPayload := []byte(`["options_test_payload"]`)
-	err = b.Publish(ctx, "test.options", testPayload)
+	_, err = b.Publish(ctx, "test.options", testPayload)
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for message or timeout
@@ -754,7 +768,7 @@ func TestMultipleConsumers(t *testing.T) {
 	require.NoError(t, err, "Failed to subscribe queue2 to test topic")
 
 	// Custom worker config to speed up tests
-	workerConf := bus.WorkerConfig{
+	workerConf := &bus.WorkerConfig{
 		MaxLockPerSecond:          1000,
 		MaxBufferJobsCount:        1000,
 		MaxPerformPerSecond:       1000,
@@ -794,7 +808,7 @@ func TestMultipleConsumers(t *testing.T) {
 
 	// Publish a message to the test topic
 	testPayload := []byte(`["multiconsumer_test"]`)
-	err = b.Publish(ctx, testTopic, testPayload)
+	_, err = b.Publish(ctx, testTopic, testPayload)
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for messages to be received with a fixed timeout
@@ -864,9 +878,9 @@ func TestSubscriptionPlanConfig(t *testing.T) {
 	queue := b.Queue(testQueue)
 
 	// Create custom plan config
-	customPlan := bus.PlanConfig{
+	customPlan := &bus.PlanConfig{
 		RunAtDelta: 500 * time.Millisecond,
-		RetryPolicy: que.RetryPolicy{
+		RetryPolicy: &que.RetryPolicy{
 			InitialInterval:        1 * time.Second,
 			MaxInterval:            10 * time.Second,
 			NextIntervalMultiplier: 1.5,
@@ -919,7 +933,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 	t.Logf("[%s] Setting up consumers...", time.Since(startTime))
 
 	// Custom worker config to speed up tests
-	workerConf := bus.WorkerConfig{
+	workerConf := &bus.WorkerConfig{
 		MaxLockPerSecond:          1000,
 		MaxBufferJobsCount:        1000,
 		MaxPerformPerSecond:       1000,
@@ -1002,7 +1016,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 
 	t.Logf("[%s] Publishing first message...", time.Since(startTime))
 	publishStartTime := time.Now()
-	err = b.Dispatch(ctx, &bus.Outbound{
+	_, err = b.Dispatch(ctx, &bus.Outbound{
 		Message: bus.Message{
 			Subject: testSubject,
 			Header:  testHeader,
@@ -1025,7 +1039,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		assert.Equal(t, testSubject, msg.Subject, "Message subject mismatch in queue1")
 		assert.Equal(t, testPayload, msg.Payload, "Message payload mismatch in queue1")
 		assert.Equal(t, "application/json", msg.Header.Get("Content-Type"), "Header mismatch in queue1")
-		assert.Equal(t, "event.*.created", msg.Pattern, "Pattern mismatch in queue1")
+		assert.Equal(t, "event.*.created", msg.Header.Get(bus.HeaderSubscriptionPattern), "Pattern mismatch in queue1")
 	case <-ctx.Done():
 		t.Fatal("Timed out waiting for message in queue1")
 	}
@@ -1039,7 +1053,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		assert.Equal(t, testSubject, msg.Subject, "Message subject mismatch in queue2")
 		assert.Equal(t, testPayload, msg.Payload, "Message payload mismatch in queue2")
 		assert.Equal(t, "application/json", msg.Header.Get("Content-Type"), "Header mismatch in queue2")
-		assert.Equal(t, "event.user.*", msg.Pattern, "Pattern mismatch in queue2")
+		assert.Equal(t, "event.user.*", msg.Header.Get(bus.HeaderSubscriptionPattern), "Pattern mismatch in queue2")
 	case <-ctx.Done():
 		t.Fatal("Timed out waiting for message in queue2")
 	}
@@ -1053,7 +1067,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 		assert.Equal(t, testSubject, msg.Subject, "Message subject mismatch in queue3")
 		assert.Equal(t, testPayload, msg.Payload, "Message payload mismatch in queue3")
 		assert.Equal(t, "application/json", msg.Header.Get("Content-Type"), "Header mismatch in queue3")
-		assert.Equal(t, "event.>", msg.Pattern, "Pattern mismatch in queue3")
+		assert.Equal(t, "event.>", msg.Header.Get(bus.HeaderSubscriptionPattern), "Pattern mismatch in queue3")
 	case <-ctx.Done():
 		t.Fatal("Timed out waiting for message in queue3")
 	}
@@ -1090,7 +1104,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 	// Publish the same message again
 	t.Logf("[%s] Publishing second message...", time.Since(startTime))
 	publish2StartTime := time.Now()
-	err = b.Publish(ctx, testSubject, testPayload)
+	_, err = b.Publish(ctx, testSubject, testPayload)
 	require.NoError(t, err, "Failed to publish second message")
 	t.Logf("[%s] Second publish took %s", time.Since(startTime), time.Since(publish2StartTime))
 
@@ -1142,4 +1156,993 @@ func drainChannel(ch chan *bus.Inbound) {
 	default:
 		// Channel already empty
 	}
+}
+
+// TestGetMetadata verifies metadata tracking functionality
+func TestGetMetadata(t *testing.T) {
+	cleanupAllTables()
+
+	dialect, err := pgbus.NewDialect(db)
+	require.NoError(t, err, "Failed to create dialect instance")
+
+	b, err := bus.New(dialect)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	metadata, err := dialect.GetMetadata(ctx)
+	require.NoError(t, err, "Failed to get metadata")
+
+	assert.NotNil(t, metadata, "Metadata should not be nil")
+	assert.EqualValues(t, 0, metadata.TotalSubscriptions)
+	assert.EqualValues(t, 1, metadata.Version)
+
+	queue := b.Queue("test_queue")
+	require.NotNil(t, queue, "Queue should not be nil")
+
+	_, err = queue.Subscribe(ctx, "test.>", bus.WithPlanConfig(&bus.PlanConfig{
+		RunAtDelta: 1 * time.Second,
+	}))
+	require.NoError(t, err, "Failed to subscribe to test.>")
+	metadata, err = dialect.GetMetadata(ctx)
+	require.NoError(t, err, "Failed to get metadata")
+	assert.EqualValues(t, 1, metadata.TotalSubscriptions)
+	assert.EqualValues(t, 2, metadata.Version)
+
+	_, err = queue.Subscribe(ctx, "test.>") // without options
+	require.NoError(t, err, "Failed to subscribe to test.>")
+	metadata, err = dialect.GetMetadata(ctx)
+	require.NoError(t, err, "Failed to get metadata")
+	assert.EqualValues(t, 1, metadata.TotalSubscriptions)
+	assert.EqualValues(t, 3, metadata.Version)
+
+	sub, err := queue.Subscribe(ctx, "test.>")
+	require.NoError(t, err, "Failed to subscribe to test.>")
+	metadata, err = dialect.GetMetadata(ctx)
+	require.NoError(t, err, "Failed to get metadata")
+	assert.EqualValues(t, 1, metadata.TotalSubscriptions)
+	assert.EqualValues(t, 3, metadata.Version)
+
+	err = sub.Unsubscribe(ctx)
+	require.NoError(t, err, "Failed to unsubscribe")
+	metadata, err = dialect.GetMetadata(ctx)
+	require.NoError(t, err, "Failed to get metadata")
+	assert.EqualValues(t, 0, metadata.TotalSubscriptions)
+	assert.EqualValues(t, 4, metadata.Version)
+}
+
+// TestIndexedQueryEdgeCases tests pattern matching edge cases with real database operations
+func TestIndexedQueryEdgeCases(t *testing.T) {
+	cleanupAllTables()
+
+	ctx := context.Background()
+
+	// Test cases with patterns and subjects
+	tests := []struct {
+		name        string
+		patterns    []string // patterns to subscribe to
+		subject     string   // subject to test
+		shouldMatch bool     // whether subject should match any pattern
+		description string
+	}{
+		// Basic exact matching
+		{
+			name:        "exact_match",
+			patterns:    []string{"events.user.created"},
+			subject:     "events.user.created",
+			shouldMatch: true,
+			description: "Exact pattern and subject should match",
+		},
+		{
+			name:        "different_lengths_no_wildcard",
+			patterns:    []string{"events.user"},
+			subject:     "events.user.created",
+			shouldMatch: false,
+			description: "Subject longer than pattern without wildcards should not match",
+		},
+		{
+			name:        "subject_shorter_than_pattern",
+			patterns:    []string{"events.user.created"},
+			subject:     "events.user",
+			shouldMatch: false,
+			description: "Subject shorter than pattern should not match",
+		},
+
+		// Single token wildcard (*) edge cases
+		{
+			name:        "single_wildcard_exact_length",
+			patterns:    []string{"events.*.created"},
+			subject:     "events.user.created",
+			shouldMatch: true,
+			description: "Single wildcard with exact token count should match",
+		},
+		{
+			name:        "single_wildcard_extra_subject_tokens",
+			patterns:    []string{"events.*"},
+			subject:     "events.user.created",
+			shouldMatch: false,
+			description: "Single wildcard with extra subject tokens should not match",
+		},
+		{
+			name:        "single_wildcard_missing_subject_tokens",
+			patterns:    []string{"events.*.created"},
+			subject:     "events.user",
+			shouldMatch: false,
+			description: "Single wildcard with missing subject tokens should not match",
+		},
+
+		// Multi-level wildcard (>) edge cases
+		{
+			name:        "multi_wildcard_one_extra_token",
+			patterns:    []string{"events.>"},
+			subject:     "events.user",
+			shouldMatch: true,
+			description: "Multi-level wildcard should match one extra token",
+		},
+		{
+			name:        "multi_wildcard_many_extra_tokens",
+			patterns:    []string{"events.>"},
+			subject:     "events.user.created.successfully",
+			shouldMatch: true,
+			description: "Multi-level wildcard should match many extra tokens",
+		},
+		{
+			name:        "multi_wildcard_exact_length",
+			patterns:    []string{"events.user.>"},
+			subject:     "events.user.created",
+			shouldMatch: true,
+			description: "Multi-level wildcard should match exactly one extra token",
+		},
+		{
+			name:        "multi_wildcard_no_extra_tokens",
+			patterns:    []string{"events.user.>"},
+			subject:     "events.user",
+			shouldMatch: false,
+			description: "Multi-level wildcard requires at least one extra token",
+		},
+		{
+			name:        "root_multi_wildcard",
+			patterns:    []string{">"},
+			subject:     "events",
+			shouldMatch: true,
+			description: "Root multi-level wildcard should match any subject",
+		},
+		{
+			name:        "root_multi_wildcard_multiple_tokens",
+			patterns:    []string{">"},
+			subject:     "events.user.created",
+			shouldMatch: true,
+			description: "Root multi-level wildcard should match multiple tokens",
+		},
+
+		// Combined wildcards
+		{
+			name:        "combined_wildcards",
+			patterns:    []string{"events.*.>"},
+			subject:     "events.user.created.successfully",
+			shouldMatch: true,
+			description: "Combined single and multi-level wildcards should work",
+		},
+		{
+			name:        "combined_wildcards_insufficient_tokens",
+			patterns:    []string{"events.*.>"},
+			subject:     "events.user",
+			shouldMatch: false,
+			description: "Combined wildcards require sufficient subject tokens",
+		},
+
+		// Maximum token edge cases
+		{
+			name:        "max_tokens_exact",
+			patterns:    []string{"a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p"},
+			subject:     "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p",
+			shouldMatch: true,
+			description: "Maximum tokens should work for exact match",
+		},
+		{
+			name:        "max_tokens_with_wildcard",
+			patterns:    []string{"a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.*"},
+			subject:     "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.x",
+			shouldMatch: true,
+			description: "Maximum tokens with single wildcard should work",
+		},
+
+		// Multiple patterns test - ensure we test complex scenarios
+		{
+			name:        "multiple_patterns_with_mixed_matches",
+			patterns:    []string{"events.user.*", "notifications.>", "orders.*.confirmed"},
+			subject:     "events.user.created",
+			shouldMatch: true,
+			description: "Subject should match one of multiple patterns",
+		},
+		{
+			name:        "multiple_patterns_no_matches",
+			patterns:    []string{"events.admin.*", "notifications.>", "orders.*.confirmed"},
+			subject:     "products.new",
+			shouldMatch: false,
+			description: "Subject should not match any of multiple patterns",
+		},
+
+		// Edge case with empty-like patterns
+		{
+			name:        "single_token_pattern_multi_token_subject",
+			patterns:    []string{"events"},
+			subject:     "events.user",
+			shouldMatch: false,
+			description: "Single token pattern should not match multi-token subject",
+		},
+		{
+			name:        "single_token_exact_match",
+			patterns:    []string{"events"},
+			subject:     "events",
+			shouldMatch: true,
+			description: "Single token pattern should match single token subject exactly",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Clean up before each test case
+			cleanupAllTables()
+
+			// Create fresh bus instance
+			testBus, err := pgbus.New(db)
+			require.NoError(t, err, "Failed to create test Bus instance")
+
+			// Create a test queue and subscribe to all patterns
+			queue := testBus.Queue("edge_case_test_queue")
+			for i, pattern := range tt.patterns {
+				_, err := queue.Subscribe(ctx, pattern)
+				require.NoError(t, err, "Failed to subscribe to pattern %s", pattern)
+				t.Logf("Subscribed to pattern %d: %s", i+1, pattern)
+			}
+
+			// Test the subject matching
+			matchingSubs, err := testBus.BySubject(ctx, tt.subject)
+			require.NoError(t, err, "Failed to get matching subscriptions for subject %s", tt.subject)
+
+			// Verify the expectation
+			hasMatches := len(matchingSubs) > 0
+			assert.Equal(t, tt.shouldMatch, hasMatches,
+				"Subject '%s' match expectation failed. Expected: %v, Got: %v matches. Description: %s",
+				tt.subject, tt.shouldMatch, len(matchingSubs), tt.description)
+
+			if tt.shouldMatch && len(matchingSubs) > 0 {
+				// Log which patterns matched for debugging
+				for _, sub := range matchingSubs {
+					t.Logf("Pattern '%s' matched subject '%s'", sub.Pattern(), tt.subject)
+				}
+			}
+
+			t.Logf("Test case '%s': patterns=%v, subject='%s', expected=%v, actual=%v",
+				tt.name, tt.patterns, tt.subject, tt.shouldMatch, hasMatches)
+		})
+	}
+}
+
+func TestTTLAndHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err)
+
+	t.Run("TTL Subscription Creation", func(t *testing.T) {
+		queue := b.Queue("test-ttl-queue")
+
+		// Create subscription with 200ms TTL
+		sub, err := queue.Subscribe(ctx, "test.ttl",
+			bus.WithTTL(200*time.Millisecond),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, sub)
+
+		// Verify subscription was created successfully
+		subs, err := queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		require.Len(t, subs, 1)
+		assert.Equal(t, "test.ttl", subs[0].Pattern())
+	})
+
+	t.Run("Heartbeat Updates Expiration", func(t *testing.T) {
+		queue := b.Queue("test-heartbeat-queue")
+
+		// Create subscription with 300ms TTL
+		sub, err := queue.Subscribe(ctx, "test.heartbeat",
+			bus.WithTTL(300*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Wait a bit and send heartbeat
+		time.Sleep(100 * time.Millisecond)
+		err = sub.Heartbeat(ctx)
+		require.NoError(t, err)
+
+		// Verify heartbeat was successful by ensuring subscription still exists
+		subs, err := queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		require.Len(t, subs, 1)
+		assert.Equal(t, "test.heartbeat", subs[0].Pattern())
+
+		// Wait 150ms (total elapsed ~250ms from heartbeat, should still be valid since TTL is 300ms)
+		time.Sleep(150 * time.Millisecond)
+
+		subs, err = queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 1, "Subscription should still exist after heartbeat extended TTL")
+
+		// Now wait for actual expiration (wait another 200ms to ensure it expires)
+		time.Sleep(200 * time.Millisecond)
+
+		subs, err = queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 0, "Subscription should be expired now")
+	})
+
+	t.Run("Non-TTL Subscriptions Not Affected", func(t *testing.T) {
+		cleanupAllTables() // Clean up before this test
+		b, err := pgbus.New(db)
+		require.NoError(t, err)
+
+		// Create regular subscription without TTL
+		queue := b.Queue("test-no-ttl-queue")
+		_, err = queue.Subscribe(ctx, "test.no-ttl")
+		require.NoError(t, err)
+
+		// Create another subscription with TTL that will expire
+		_, err = queue.Subscribe(ctx, "test.will-expire",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Initially should see both subscriptions
+		subs, err := queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 2, "Should initially see both subscriptions")
+
+		// Wait for TTL subscription to expire
+		time.Sleep(200 * time.Millisecond)
+
+		// Verify expired subscription is now filtered from queries
+		subs, err = queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 1, "Should only see non-TTL subscription after expiration")
+		assert.Equal(t, "test.no-ttl", subs[0].Pattern())
+	})
+
+	t.Run("Heartbeat Keeps Subscription Alive", func(t *testing.T) {
+		cleanupAllTables() // Clean up before this test
+		b, err := pgbus.New(db)
+		require.NoError(t, err)
+
+		queue := b.Queue("test-heartbeat-alive-queue")
+
+		// Create subscription with 300ms TTL
+		sub, err := queue.Subscribe(ctx, "test.heartbeat-alive",
+			bus.WithTTL(300*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Send heartbeat after 150ms (before expiration)
+		time.Sleep(150 * time.Millisecond)
+		err = sub.Heartbeat(ctx)
+		require.NoError(t, err)
+
+		// Wait another 150ms (total 300ms, but heartbeat extended TTL)
+		time.Sleep(150 * time.Millisecond)
+
+		// Subscription should still exist
+		subs, err := queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 1, "Subscription should still exist after heartbeat")
+
+		// Now wait for actual expiration without heartbeat
+		time.Sleep(350 * time.Millisecond)
+
+		// Verify subscription is now filtered from queries (expired)
+		subs, err = queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 0, "Subscription should be filtered from queries after expiration")
+
+		// Heartbeat should fail now (subscription was expired and then deleted)
+		err = sub.Heartbeat(ctx)
+		assert.Error(t, err, "Heartbeat should fail for expired/deleted subscription")
+	})
+}
+
+// TestExpiredSubscriptionFiltering tests that expired subscriptions are properly filtered
+// from all query methods
+func TestExpiredSubscriptionFiltering(t *testing.T) {
+	ctx := context.Background()
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err)
+
+	queue := b.Queue("test-filtering-queue")
+
+	t.Run("BySubject Filters Expired Subscriptions", func(t *testing.T) {
+		// Create subscription with 150ms TTL
+		_, err := queue.Subscribe(ctx, "test.expired",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Initially should find the subscription
+		subs, err := b.BySubject(ctx, "test.expired")
+		require.NoError(t, err)
+		assert.Len(t, subs, 1, "Should find subscription before expiration")
+
+		// Wait for expiration
+		time.Sleep(200 * time.Millisecond)
+
+		// Should not find the expired subscription
+		subs, err = b.BySubject(ctx, "test.expired")
+		require.NoError(t, err)
+		assert.Len(t, subs, 0, "Should not find expired subscription")
+	})
+
+	t.Run("ByQueue Filters Expired Subscriptions", func(t *testing.T) {
+		cleanupAllTables()
+		b, err := pgbus.New(db)
+		require.NoError(t, err)
+		queue := b.Queue("test-filtering-queue2")
+
+		// Create subscription with 150ms TTL
+		_, err = queue.Subscribe(ctx, "test.queue-expired",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Initially should find the subscription
+		subs, err := queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 1, "Should find subscription before expiration")
+
+		// Wait for expiration
+		time.Sleep(200 * time.Millisecond)
+
+		// Should not find the expired subscription
+		subs, err = queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 0, "Should not find expired subscription")
+	})
+
+	t.Run("Mixed Expired and Valid Subscriptions", func(t *testing.T) {
+		cleanupAllTables()
+		b, err := pgbus.New(db)
+		require.NoError(t, err)
+		queue := b.Queue("test-filtering-queue3")
+
+		// Create one subscription with TTL that will expire
+		_, err = queue.Subscribe(ctx, "test.will-expire",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Create one subscription without TTL (permanent)
+		_, err = queue.Subscribe(ctx, "test.permanent")
+		require.NoError(t, err)
+
+		// Initially should find both subscriptions
+		subs, err := queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 2, "Should find both subscriptions initially")
+
+		// Wait for first subscription to expire
+		time.Sleep(200 * time.Millisecond)
+
+		// Should only find the permanent subscription
+		subs, err = queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 1, "Should find only permanent subscription")
+		assert.Equal(t, "test.permanent", subs[0].Pattern())
+	})
+}
+
+// TestExpiredSubscriptionUpdatePrevention tests that expired subscriptions cannot be updated
+func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
+	ctx := context.Background()
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err)
+
+	queue := b.Queue("test-update-prevention-queue")
+
+	t.Run("Heartbeat Fails for Expired Subscription", func(t *testing.T) {
+		// Create subscription with 150ms TTL
+		sub, err := queue.Subscribe(ctx, "test.expired-heartbeat",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Wait for subscription to expire
+		time.Sleep(200 * time.Millisecond)
+
+		// Attempt to update heartbeat - should fail
+		err = sub.Heartbeat(ctx)
+		assert.Error(t, err, "Heartbeat should fail for expired subscription")
+		assert.Contains(t, err.Error(), "subscription not found or expired")
+	})
+
+	t.Run("Valid Subscription Heartbeat Still Works", func(t *testing.T) {
+		cleanupAllTables()
+		b, err := pgbus.New(db)
+		require.NoError(t, err)
+		queue := b.Queue("test-update-prevention-queue2")
+
+		// Create subscription with longer TTL
+		sub, err := queue.Subscribe(ctx, "test.valid-heartbeat",
+			bus.WithTTL(500*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		// Heartbeat should succeed for valid subscription
+		err = sub.Heartbeat(ctx)
+		assert.NoError(t, err, "Heartbeat should succeed for valid subscription")
+
+		// Wait a bit and try again
+		time.Sleep(100 * time.Millisecond)
+		err = sub.Heartbeat(ctx)
+		assert.NoError(t, err, "Heartbeat should still succeed")
+	})
+}
+
+// TestUpsertRevivesExpiredSubscription tests that Upsert handles expired subscriptions correctly
+func TestUpsertRevivesExpiredSubscription(t *testing.T) {
+	ctx := context.Background()
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err)
+
+	queue := b.Queue("test-upsert-revive-queue")
+
+	t.Run("Upsert Revives Expired Subscription", func(t *testing.T) {
+		// Create subscription with 150ms TTL
+		sub1, err := queue.Subscribe(ctx, "test.upsert-revive",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		originalID := sub1.ID()
+
+		// Wait for subscription to expire
+		time.Sleep(200 * time.Millisecond)
+
+		// Verify subscription is no longer visible in queries (filtered as expired)
+		subs, err := queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 0, "Expired subscription should not be visible")
+
+		// Now try to subscribe again with same pattern - should revive the expired subscription
+		sub2, err := queue.Subscribe(ctx, "test.upsert-revive",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		newID := sub2.ID()
+
+		// Should be a new subscription ID (delete-and-recreate creates new record)
+		assert.NotEqual(t, originalID, newID, "Should create new subscription (delete-and-recreate strategy)")
+
+		// Revived subscription should be visible
+		subs, err = queue.Subscriptions(ctx)
+		require.NoError(t, err)
+		assert.Len(t, subs, 1, "Revived subscription should be visible")
+		assert.Equal(t, newID, subs[0].ID(), "Should return the revived subscription")
+
+		// Heartbeat should work on revived subscription
+		err = sub2.Heartbeat(ctx)
+		assert.NoError(t, err, "Heartbeat should work on revived subscription")
+
+		// Wait for subscription to expire
+		time.Sleep(200 * time.Millisecond)
+
+		// Heartbeat should fail for expired subscription
+		err = sub2.Heartbeat(ctx)
+		assert.Error(t, err, "Heartbeat should fail for expired subscription")
+		assert.Contains(t, err.Error(), "subscription not found or expired")
+
+		sub3, err := queue.Subscribe(ctx, "test.upsert-revive",
+			bus.WithTTL(150*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		assert.NotEqual(t, sub3.ID(), newID, "Should create new subscription since the previous one was expired and deleted")
+	})
+}
+
+// TestQueryJobsBySubscriptionID tests querying jobs by subscription ID from header
+func TestQueryJobsBySubscriptionID(t *testing.T) {
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	// Set up queues and subscriptions
+	queue1 := b.Queue(testQueue)
+	queue2 := b.Queue(testQueue2)
+
+	sub1, err := queue1.Subscribe(ctx, "orders.new")
+	require.NoError(t, err, "Failed to subscribe")
+
+	sub2, err := queue2.Subscribe(ctx, "notifications.>")
+	require.NoError(t, err, "Failed to subscribe")
+
+	// Publish messages to create jobs
+	result, err := b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
+	require.NoError(t, err, "Failed to publish message")
+	require.NotNil(t, result, "Publish result should not be nil")
+
+	result2, err := b.Publish(ctx, "notifications.user.login", []byte(`["notification_payload"]`))
+	require.NoError(t, err, "Failed to publish message")
+	require.NotNil(t, result2, "Publish result should not be nil")
+
+	// Verify jobs were created using direct SQL queries since QueryJobsBySubscriptionID doesn't exist
+	// Query jobs by subscription ID using SQL
+	rows, err := db.QueryContext(ctx, `
+		SELECT COUNT(*) 
+		FROM goque_jobs 
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
+	`, sub1.ID())
+	require.NoError(t, err, "Failed to query jobs by subscription ID")
+	defer rows.Close()
+
+	var count1 int
+	require.True(t, rows.Next())
+	err = rows.Scan(&count1)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 1, count1, "Should find 1 job for sub1")
+
+	// Query jobs for subscription 2
+	rows2, err := db.QueryContext(ctx, `
+		SELECT COUNT(*) 
+		FROM goque_jobs 
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
+	`, sub2.ID())
+	require.NoError(t, err, "Failed to query jobs by subscription ID")
+	defer rows2.Close()
+
+	var count2 int
+	require.True(t, rows2.Next())
+	err = rows2.Scan(&count2)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 1, count2, "Should find 1 job for sub2")
+
+	// Query jobs for non-existent subscription ID
+	rows3, err := db.QueryContext(ctx, `
+		SELECT COUNT(*) 
+		FROM goque_jobs 
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
+	`, "99999")
+	require.NoError(t, err, "Should not error for non-existent subscription ID")
+	defer rows3.Close()
+
+	var count3 int
+	require.True(t, rows3.Next())
+	err = rows3.Scan(&count3)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 0, count3, "Should return 0 for non-existent subscription ID")
+}
+
+// TestSubscriptionDrain tests the Drain method functionality
+func TestSubscriptionDrain(t *testing.T) {
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	t.Run("BasicDrainFunctionality", func(t *testing.T) {
+		cleanupAllTables()
+
+		// Create queues and subscriptions
+		queue1 := b.Queue("drain_test_queue1")
+		queue2 := b.Queue("drain_test_queue2")
+
+		// Subscribe to different patterns
+		sub1, err := queue1.Subscribe(ctx, "test.drain.*")
+		require.NoError(t, err, "Failed to subscribe to pattern")
+
+		sub2, err := queue2.Subscribe(ctx, "test.drain.specific")
+		require.NoError(t, err, "Failed to subscribe to pattern")
+
+		// Publish messages that will create jobs
+		_, err = b.Publish(ctx, "test.drain.message1", []byte("payload1"))
+		require.NoError(t, err, "Failed to publish message1")
+
+		_, err = b.Publish(ctx, "test.drain.message2", []byte("payload2"))
+		require.NoError(t, err, "Failed to publish message2")
+
+		_, err = b.Publish(ctx, "test.drain.specific", []byte("payload3"))
+		require.NoError(t, err, "Failed to publish message3")
+
+		// Verify jobs were created
+		jobsQueue1 := getQueueJobs(t, "drain_test_queue1")
+		jobsQueue2 := getQueueJobs(t, "drain_test_queue2")
+		assert.Len(t, jobsQueue1, 3, "Queue1 should have 3 jobs") // matches test.drain.*
+		assert.Len(t, jobsQueue2, 1, "Queue2 should have 1 job")  // matches test.drain.specific
+
+		// Test drain on subscription 1
+		deletedCount1, err := sub1.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 3, deletedCount1, "Should have deleted 3 jobs from subscription 1")
+
+		// Verify jobs were deleted from queue1
+		jobsQueue1After := getQueueJobs(t, "drain_test_queue1")
+		assert.Len(t, jobsQueue1After, 0, "Queue1 should have no jobs after drain")
+
+		// Verify queue2 jobs are unaffected
+		jobsQueue2After := getQueueJobs(t, "drain_test_queue2")
+		assert.Len(t, jobsQueue2After, 1, "Queue2 should still have 1 job")
+
+		// Test drain on subscription 2
+		deletedCount2, err := sub2.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 1, deletedCount2, "Should have deleted 1 job from subscription 2")
+
+		// Verify all jobs are now drained
+		jobsQueue2Final := getQueueJobs(t, "drain_test_queue2")
+		assert.Len(t, jobsQueue2Final, 0, "Queue2 should have no jobs after drain")
+	})
+
+	t.Run("DrainWithNoJobs", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("empty_drain_queue")
+		sub, err := queue.Subscribe(ctx, "test.empty")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Drain when no jobs exist
+		deletedCount, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed even with no jobs")
+		assert.Equal(t, 0, deletedCount, "Should have deleted 0 jobs")
+	})
+
+	t.Run("DrainWithPatternFiltering", func(t *testing.T) {
+		cleanupAllTables()
+
+		// Create two subscriptions with different patterns on the same queue
+		queue := b.Queue("pattern_filter_queue")
+		sub1, err := queue.Subscribe(ctx, "orders.*")
+		require.NoError(t, err, "Failed to subscribe to orders.*")
+
+		sub2, err := queue.Subscribe(ctx, "events.*")
+		require.NoError(t, err, "Failed to subscribe to events.*")
+
+		// Publish messages to different subjects
+		_, err = b.Publish(ctx, "orders.new", []byte("order_payload"))
+		require.NoError(t, err, "Failed to publish order message")
+
+		_, err = b.Publish(ctx, "orders.updated", []byte("order_update_payload"))
+		require.NoError(t, err, "Failed to publish order update message")
+
+		_, err = b.Publish(ctx, "events.user_created", []byte("event_payload"))
+		require.NoError(t, err, "Failed to publish event message")
+
+		// Verify jobs were created
+		allJobs := getQueueJobs(t, "pattern_filter_queue")
+		assert.Len(t, allJobs, 3, "Should have 3 total jobs")
+
+		// Drain only orders.* pattern
+		deletedCount1, err := sub1.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 2, deletedCount1, "Should have deleted 2 jobs matching orders.*")
+
+		// Verify only event jobs remain
+		remainingJobs := getQueueJobs(t, "pattern_filter_queue")
+		assert.Len(t, remainingJobs, 1, "Should have 1 job remaining")
+
+		// Drain events.* pattern
+		deletedCount2, err := sub2.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 1, deletedCount2, "Should have deleted 1 job matching events.*")
+
+		// Verify all jobs are drained
+		finalJobs := getQueueJobs(t, "pattern_filter_queue")
+		assert.Len(t, finalJobs, 0, "Should have no jobs remaining")
+	})
+
+	t.Run("DrainMultipleJobsPartiallyLocked", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("partial_lock_queue")
+		sub, err := queue.Subscribe(ctx, "test.partial")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Publish multiple messages
+		for i := 0; i < 5; i++ {
+			_, err = b.Publish(ctx, "test.partial", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify all jobs were created
+		jobs := getQueueJobs(t, "partial_lock_queue")
+		require.Len(t, jobs, 5, "Should have 5 jobs")
+
+		// Start transactions to hold advisory locks
+		tx1, err := db.Begin()
+		require.NoError(t, err, "Failed to start transaction 1")
+		tx2, err := db.Begin()
+		require.NoError(t, err, "Failed to start transaction 2")
+
+		// Lock some jobs (simulate processing)
+		_, err = tx1.Exec("SELECT pg_advisory_xact_lock($1)", jobs[1].ID)
+		require.NoError(t, err, "Failed to lock job 1")
+		_, err = tx2.Exec("SELECT pg_advisory_xact_lock($1)", jobs[3].ID)
+		require.NoError(t, err, "Failed to lock job 3")
+
+		// Drain should delete only unlocked jobs
+		deletedCount, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 3, deletedCount, "Should have deleted 3 unlocked jobs")
+
+		// Verify only locked jobs remain
+		remainingJobs := getQueueJobs(t, "partial_lock_queue")
+		assert.Len(t, remainingJobs, 2, "Should have 2 locked jobs remaining")
+
+		// Release locks by committing transactions
+		err = tx1.Commit()
+		require.NoError(t, err, "Failed to commit transaction 1")
+		err = tx2.Commit()
+		require.NoError(t, err, "Failed to commit transaction 2")
+
+		// Drain remaining jobs
+		deletedCount2, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 2, deletedCount2, "Should have deleted 2 remaining jobs")
+
+		// Verify all jobs are deleted
+		finalJobs := getQueueJobs(t, "partial_lock_queue")
+		assert.Len(t, finalJobs, 0, "All jobs should be deleted")
+	})
+
+	t.Run("DrainErrorHandling", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("error_test_queue")
+		sub, err := queue.Subscribe(ctx, "test.error")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Test drain with cancelled context
+		cancelledCtx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err = sub.Drain(cancelledCtx)
+		assert.Error(t, err, "Drain should fail with cancelled context")
+	})
+
+	t.Run("DrainWithJobStatusFiltering", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("status_filter_queue")
+		sub, err := queue.Subscribe(ctx, "test.status")
+		require.NoError(t, err, "Failed to subscribe")
+
+		// Publish several messages to create jobs
+		for i := 0; i < 5; i++ {
+			_, err = b.Publish(ctx, "test.status", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify all jobs were created
+		jobs := getQueueJobs(t, "status_filter_queue")
+		require.Len(t, jobs, 5, "Should have 5 jobs")
+
+		// Test the filtering condition: (done_at IS NULL AND expired_at IS NULL AND retry_count = 0)
+		// For a job to be INCLUDED in drain, ALL conditions must be true:
+		// done_at IS NULL AND expired_at IS NULL AND retry_count = 0
+
+		// Job 0: Set done_at - should NOT be drained (done_at IS NOT NULL)
+		_, err = db.Exec("UPDATE goque_jobs SET done_at = NOW() WHERE id = $1", jobs[0].ID)
+		require.NoError(t, err, "Failed to mark job 0 as done")
+
+		// Job 1: Set expired_at - should NOT be drained (expired_at IS NOT NULL)
+		_, err = db.Exec("UPDATE goque_jobs SET expired_at = NOW() WHERE id = $1", jobs[1].ID)
+		require.NoError(t, err, "Failed to mark job 1 as expired")
+
+		// Job 2: Set retry_count != 0 - should NOT be drained (retry_count != 0)
+		_, err = db.Exec("UPDATE goque_jobs SET retry_count = 3 WHERE id = $1", jobs[2].ID)
+		require.NoError(t, err, "Failed to set job 2 retry_count to 3")
+
+		// Job 3: Set combination that excludes it - should NOT be drained
+		_, err = db.Exec("UPDATE goque_jobs SET done_at = NOW(), expired_at = NOW(), retry_count = 5 WHERE id = $1", jobs[3].ID)
+		require.NoError(t, err, "Failed to set job 3 to be excluded from drain")
+
+		// Job 4: Default to meet all conditions - should be drained (done_at IS NULL, expired_at IS NULL, retry_count = 0)
+
+		// Run drain - should delete only job 4
+		deletedCount, err := sub.Drain(ctx)
+		require.NoError(t, err, "Drain should succeed")
+		assert.Equal(t, 1, deletedCount, "Should have deleted 1 job that meets the AND condition")
+
+		// Verify jobs 0, 1, 2, 3 remain
+		remainingJobs := getQueueJobs(t, "status_filter_queue")
+		assert.Len(t, remainingJobs, 4, "Should have 4 jobs remaining")
+
+		// Verify which jobs remain
+		remainingIDs := make(map[int]bool)
+		for _, job := range remainingJobs {
+			remainingIDs[job.ID] = true
+		}
+
+		assert.True(t, remainingIDs[jobs[0].ID], "Job 0 (done) should remain")
+		assert.True(t, remainingIDs[jobs[1].ID], "Job 1 (expired) should remain")
+		assert.True(t, remainingIDs[jobs[2].ID], "Job 2 (retry_count != 0) should remain")
+		assert.True(t, remainingIDs[jobs[3].ID], "Job 3 (multiple conditions) should remain")
+		assert.False(t, remainingIDs[jobs[4].ID], "Job 4 (meets all conditions) should be deleted")
+	})
+}
+
+// TestAutoDrainOnUnsubscribe tests that autoDrain automatically cleans up jobs when unsubscribing
+func TestAutoDrainOnUnsubscribe(t *testing.T) {
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	t.Run("AutoDrainEnabled", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("auto_drain_enabled_queue")
+
+		// Create subscription with autoDrain enabled
+		sub, err := queue.Subscribe(ctx, "test.autodrain",
+			bus.WithAutoDrain(true),
+		)
+		require.NoError(t, err, "Failed to subscribe with autoDrain")
+
+		// Publish some messages to create jobs
+		for i := 0; i < 3; i++ {
+			_, err = b.Publish(ctx, "test.autodrain", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify jobs were created
+		jobs := getQueueJobs(t, "auto_drain_enabled_queue")
+		assert.Len(t, jobs, 3, "Should have 3 jobs before unsubscribe")
+
+		// Unsubscribe - should automatically drain jobs
+		err = sub.Unsubscribe(ctx)
+		require.NoError(t, err, "Failed to unsubscribe")
+
+		// Verify jobs were automatically drained
+		jobsAfter := getQueueJobs(t, "auto_drain_enabled_queue")
+		assert.Len(t, jobsAfter, 0, "Jobs should be automatically drained after unsubscribe")
+	})
+
+	t.Run("AutoDrainDisabled", func(t *testing.T) {
+		cleanupAllTables()
+
+		queue := b.Queue("auto_drain_disabled_queue")
+
+		// Create subscription without autoDrain (default is false)
+		sub, err := queue.Subscribe(ctx, "test.no_autodrain")
+		require.NoError(t, err, "Failed to subscribe without autoDrain")
+
+		// Publish some messages to create jobs
+		for i := 0; i < 3; i++ {
+			_, err = b.Publish(ctx, "test.no_autodrain", []byte(fmt.Sprintf("payload_%d", i)))
+			require.NoError(t, err, "Failed to publish message %d", i)
+		}
+
+		// Verify jobs were created
+		jobs := getQueueJobs(t, "auto_drain_disabled_queue")
+		assert.Len(t, jobs, 3, "Should have 3 jobs before unsubscribe")
+
+		// Unsubscribe - should NOT automatically drain jobs
+		err = sub.Unsubscribe(ctx)
+		require.NoError(t, err, "Failed to unsubscribe")
+
+		// Verify jobs were NOT automatically drained
+		jobsAfter := getQueueJobs(t, "auto_drain_disabled_queue")
+		assert.Len(t, jobsAfter, 3, "Jobs should remain after unsubscribe when autoDrain is disabled")
+	})
 }

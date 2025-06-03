@@ -13,8 +13,8 @@ import (
 )
 
 // DefaultRetryPolicyFactory provides a default retry policy for published messages.
-var DefaultRetryPolicyFactory = func() que.RetryPolicy {
-	return que.RetryPolicy{
+var DefaultRetryPolicyFactory = func() *que.RetryPolicy {
+	return &que.RetryPolicy{
 		InitialInterval:        30 * time.Second,
 		MaxInterval:            600 * time.Second,
 		NextIntervalMultiplier: 2,
@@ -24,8 +24,8 @@ var DefaultRetryPolicyFactory = func() que.RetryPolicy {
 }
 
 // DefaultPlanConfigFactory provides default settings for subscription jobs.
-var DefaultPlanConfigFactory = func() PlanConfig {
-	return PlanConfig{
+var DefaultPlanConfigFactory = func() *PlanConfig {
+	return &PlanConfig{
 		RetryPolicy:     DefaultRetryPolicyFactory(),
 		RunAtDelta:      0, // Immediate execution
 		UniqueLifecycle: que.Ignore,
@@ -33,8 +33,8 @@ var DefaultPlanConfigFactory = func() PlanConfig {
 }
 
 // DefaultWorkerConfigFactory provides default settings for workers.
-var DefaultWorkerConfigFactory = func() WorkerConfig {
-	return WorkerConfig{
+var DefaultWorkerConfigFactory = func() *WorkerConfig {
+	return &WorkerConfig{
 		MaxLockPerSecond:          5,
 		MaxBufferJobsCount:        0,
 		MaxPerformPerSecond:       1000,
@@ -70,18 +70,22 @@ type WorkerConfig struct {
 // PlanConfig defines how a queue processes messages for a specific subject pattern.
 type PlanConfig struct {
 	// RetryPolicy defines how to retry failed job executions.
-	RetryPolicy que.RetryPolicy `json:"retryPolicy"`
+	RetryPolicy *que.RetryPolicy
 
 	// RunAtDelta specifies the duration to delay job execution from the time of message receipt.
 	// Zero means execute immediately, positive values mean delayed execution.
-	RunAtDelta time.Duration `json:"runAtDelta"`
+	RunAtDelta time.Duration
 
 	// UniqueLifecycle controls the uniqueness behavior of the job.
-	UniqueLifecycle que.UniqueLifecycle `json:"uniqueLifecycle"`
+	UniqueLifecycle que.UniqueLifecycle
 }
 
 // Equal compares this PlanConfig with another and returns true if they are equivalent.
-func (p PlanConfig) Equal(other PlanConfig) bool {
+func (p *PlanConfig) Equal(other *PlanConfig) bool {
+	if p == nil || other == nil {
+		return p == other
+	}
+
 	if p.RunAtDelta != other.RunAtDelta || p.UniqueLifecycle != other.UniqueLifecycle {
 		return false
 	}
@@ -99,11 +103,11 @@ type ConsumeOption func(*ConsumeOptions)
 // ConsumeOptions holds all the options for creating a worker.
 type ConsumeOptions struct {
 	// WorkerConfig contains the performance-related settings for a worker.
-	WorkerConfig WorkerConfig
+	WorkerConfig *WorkerConfig
 }
 
 // WithWorkerConfig sets the worker configuration for a worker.
-func WithWorkerConfig(config WorkerConfig) ConsumeOption {
+func WithWorkerConfig(config *WorkerConfig) ConsumeOption {
 	return func(opts *ConsumeOptions) {
 		opts.WorkerConfig = config
 	}
@@ -112,22 +116,51 @@ func WithWorkerConfig(config WorkerConfig) ConsumeOption {
 // SubscribeOption represents an option for customizing a subscription.
 type SubscribeOption func(*SubscribeOptions)
 
-// SubscribeOptions holds all the options for creating a subscription.
+// SubscribeOptions contains the configuration for a subscription.
 type SubscribeOptions struct {
 	// PlanConfig contains the settings for job execution.
-	PlanConfig PlanConfig
+	PlanConfig *PlanConfig `json:"planConfig"`
+
+	// TTL specifies how long the subscription should remain active without heartbeat.
+	// If set to zero or negative value, the subscription will never expire.
+	TTL time.Duration `json:"ttl"`
+
+	// AutoDrain indicates whether to automatically execute Drain() when Unsubscribe() is called.
+	AutoDrain bool `json:"autoDrain"`
 }
 
 // WithPlanConfig sets the job configuration for a subscription.
-func WithPlanConfig(config PlanConfig) SubscribeOption {
+func WithPlanConfig(config *PlanConfig) SubscribeOption {
 	return func(opts *SubscribeOptions) {
 		opts.PlanConfig = config
 	}
 }
 
+// WithTTL sets the TTL (Time To Live) for a subscription.
+// The subscription will be automatically cleaned up if no heartbeat
+// is received within this duration.
+func WithTTL(ttl time.Duration) SubscribeOption {
+	return func(o *SubscribeOptions) {
+		o.TTL = ttl
+	}
+}
+
+// WithAutoDrain sets whether to automatically execute Drain() when Unsubscribe() is called.
+// When enabled, all pending jobs for the subscription will be cleaned up upon unsubscription.
+func WithAutoDrain(autoDrain bool) SubscribeOption {
+	return func(o *SubscribeOptions) {
+		o.AutoDrain = autoDrain
+	}
+}
+
+// DialectDecorator is a function that decorates a Dialect with additional functionality.
+// It can return an error if the decoration process fails.
+type DialectDecorator func(Dialect) (Dialect, error)
+
 // BusOptions configures the Bus implementation.
 type BusOptions struct {
 	// Migrate controls whether database migrations are run during initialization.
+	// Default is true.
 	Migrate bool
 
 	// Logger is used for logging warnings and errors. If nil, a default logger will be used.
@@ -137,6 +170,11 @@ type BusOptions struct {
 	// If the number of plans exceeds this limit, they will be split into multiple transactions.
 	// If less than or equal to 0, DefaultMaxEnqueuePerBatch will be used.
 	MaxEnqueuePerBatch int
+
+	// DialectDecorator provides a way to decorate the base dialect implementation with additional
+	// functionality such as caching, metrics, or logging. If nil, the dialect is used as-is.
+	// This is applied after the dialect is created but before any operations are performed.
+	DialectDecorator DialectDecorator
 }
 
 type BusOption func(*BusOptions)
@@ -160,6 +198,37 @@ func WithMigrate(migrate bool) BusOption {
 func WithMaxEnqueuePerBatch(max int) BusOption {
 	return func(opts *BusOptions) {
 		opts.MaxEnqueuePerBatch = max
+	}
+}
+
+// WithDialectDecorator adds a decorator to the dialect.
+// Multiple decorators can be composed together and will be applied in the order provided.
+// If any decorator returns an error during application, the error will be returned from New.
+func WithDialectDecorator(decorators ...DialectDecorator) BusOption {
+	return func(opts *BusOptions) {
+		if opts.DialectDecorator != nil {
+			decorators = append(decorators, opts.DialectDecorator)
+		}
+
+		if len(decorators) == 0 {
+			return
+		}
+
+		if len(decorators) == 1 {
+			opts.DialectDecorator = decorators[0]
+			return
+		}
+
+		opts.DialectDecorator = func(next Dialect) (Dialect, error) {
+			var err error
+			for i := len(decorators); i > 0; i-- {
+				next, err = decorators[i-1](next)
+				if err != nil {
+					return nil, err
+				}
+			}
+			return next, nil
+		}
 	}
 }
 

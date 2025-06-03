@@ -4,25 +4,26 @@ package bus
 import (
 	"bytes"
 	"encoding/json"
-	"net/textproto"
+	"net/http"
 
 	"github.com/pkg/errors"
 	"github.com/qor5/go-que"
 )
 
-func (m *Message) ToRaw() json.RawMessage {
-	var hdr Header
+func (m *Message) ToRaw(sub Subscription) (json.RawMessage, error) {
+	hdr := make(Header)
 	if m.Header != nil {
-		hdr = make(Header)
 		for k, vv := range m.Header {
-			canonicalKey := textproto.CanonicalMIMEHeaderKey(k)
+			canonicalKey := http.CanonicalHeaderKey(k)
 			hdr[canonicalKey] = vv
 		}
 	}
+	hdr.Set(HeaderSubscriptionPattern, sub.Pattern())
+	hdr.Set(HeaderSubscriptionIdentifier, sub.ID())
 
 	v := struct {
 		*Message
-		Header Header `json:"header,omitempty"`
+		Header Header `json:"header"`
 	}{
 		Message: m,
 		Header:  hdr,
@@ -32,29 +33,35 @@ func (m *Message) ToRaw() json.RawMessage {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		panic(err)
+		return nil, errors.Wrap(err, "failed to encode message to JSON")
 	}
 	data := buf.Bytes()
-	return json.RawMessage(data[:len(data)-1])
+	return json.RawMessage(data[:len(data)-1]), nil
 }
 
-func ArgsFromMessageRaw(msgRaw json.RawMessage, pattern string) []byte {
-	return que.Args(msgRaw, pattern)
-}
-
+// InboundFromArgs creates an Inbound message from raw arguments.
+// This is primarily used for testing and debugging purposes.
 func InboundFromArgs(args []byte) (*Inbound, error) {
 	var msg Message
-	var pattern string
-	count, err := que.ParseArgs(args, &msg, &pattern)
+	count, err := que.ParseArgs(args, &msg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse message")
 	}
-	if count != 2 {
+	if count != 1 {
 		return nil, errors.Errorf("invalid args count: %d", count)
 	}
-
 	return &Inbound{
 		Message: msg,
-		Pattern: pattern,
 	}, nil
+}
+
+// InboundFromJob creates an Inbound message from a que.Job.
+// This is the primary method used in production message processing.
+func InboundFromJob(job que.Job) (*Inbound, error) {
+	inbound, err := InboundFromArgs(job.Plan().Args)
+	if err != nil {
+		return nil, err
+	}
+	inbound.Job = job
+	return inbound, nil
 }

@@ -11,30 +11,17 @@ package bus
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/qor5/go-bus/quex"
 	"github.com/qor5/go-que"
 )
 
-// Subscription represents an active subscription that can be unsubscribed.
-type Subscription interface {
-	// ID returns the unique identifier of the subscription.
-	ID() int64
-
-	// Queue returns the name of the queue that receives messages.
-	Queue() string
-
-	// Pattern returns the subject pattern this subscription matches against.
-	Pattern() string
-
-	// PlanConfig returns the configuration plan for this subscription.
-	PlanConfig() PlanConfig
-
-	// Unsubscribe removes this subscription.
-	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
-	// This is because go-bus is designed to support offline messages.
-	Unsubscribe(ctx context.Context) error
-}
+// Header constants for message metadata
+const (
+	HeaderSubscriptionPattern    = "Subscription-Pattern"    // The subscription pattern that matched this message
+	HeaderSubscriptionIdentifier = "Subscription-Identifier" // The subscription identifier that received this message
+)
 
 type Header = http.Header
 
@@ -44,10 +31,10 @@ type Message struct {
 	Subject string `json:"subject"`
 
 	// Header is the header of the message.
-	Header Header `json:"header,omitempty"`
+	Header Header `json:"header"`
 
 	// Payload is the actual content of the message.
-	Payload []byte `json:"payload,omitempty"`
+	Payload []byte `json:"payload"`
 }
 
 type Outbound struct {
@@ -60,14 +47,11 @@ type Outbound struct {
 }
 
 type Inbound struct {
-	// Job is the job that received the message.
-	que.Job `json:"-"`
-
 	// Message is the message content.
 	Message
 
-	// Pattern is the pattern this message matches against.
-	Pattern string `json:"pattern"`
+	// Job is the job that received the message.
+	que.Job `json:"-"`
 }
 
 // Handler represents a function that processes messages.
@@ -100,12 +84,46 @@ type Bus interface {
 	Queue(name string) Queue
 
 	// Publish sends a payload to all queues with subscriptions matching the subject.
-	Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) error
+	Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) (*Dispatch, error)
 
 	// Dispatch sends outbound messages to all queues with subscriptions matching the subject.
 	// All messages are processed in a single transaction.
-	Dispatch(ctx context.Context, msgs ...*Outbound) error
+	Dispatch(ctx context.Context, msgs ...*Outbound) (*Dispatch, error)
 
 	// BySubject returns all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)
+}
+
+// Subscription represents an active subscription to a subject pattern.
+type Subscription interface {
+	// ID returns the unique identifier of the subscription.
+	ID() string
+
+	// Queue returns the name of the queue that receives messages.
+	Queue() string
+
+	// Pattern returns the subject pattern this subscription matches against.
+	Pattern() string
+
+	// PlanConfig returns the plan configuration for this subscription.
+	PlanConfig() *PlanConfig
+
+	// Unsubscribe removes this subscription.
+	// If autoDrain was enabled in the subscription options, pending jobs will be automatically cleaned up.
+	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
+	// This is because go-bus is designed to support offline messages.
+	Unsubscribe(ctx context.Context) error
+
+	// Heartbeat updates the heartbeat timestamp for this subscription.
+	// This method should be called periodically to prevent TTL-based cleanup.
+	Heartbeat(ctx context.Context) error
+
+	// ExpiresAt returns the expiration time for this subscription.
+	// Returns zero time if the subscription never expires (no TTL).
+	ExpiresAt() time.Time
+
+	// Drain removes all pending jobs that are not currently being processed.
+	// This method is useful for cleaning up the queue without affecting jobs that are already running.
+	// Returns the number of jobs that were deleted.
+	Drain(ctx context.Context) (int, error)
 }

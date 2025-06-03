@@ -170,7 +170,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 
 			reconnectBackOff.Reset()
 		}
-	}()
+	}() // nolint:errcheck
 
 	controller := &workerController{
 		ctx: workerCtx,

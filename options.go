@@ -70,14 +70,14 @@ type WorkerConfig struct {
 // PlanConfig defines how a queue processes messages for a specific subject pattern.
 type PlanConfig struct {
 	// RetryPolicy defines how to retry failed job executions.
-	RetryPolicy *que.RetryPolicy
+	RetryPolicy *que.RetryPolicy `json:"retryPolicy"`
 
 	// RunAtDelta specifies the duration to delay job execution from the time of message receipt.
 	// Zero means execute immediately, positive values mean delayed execution.
-	RunAtDelta time.Duration
+	RunAtDelta time.Duration `json:"runAtDelta"`
 
 	// UniqueLifecycle controls the uniqueness behavior of the job.
-	UniqueLifecycle que.UniqueLifecycle
+	UniqueLifecycle que.UniqueLifecycle `json:"uniqueLifecycle"`
 }
 
 // Equal compares this PlanConfig with another and returns true if they are equivalent.

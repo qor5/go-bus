@@ -12,9 +12,6 @@ import (
 )
 
 var (
-	// ErrWorkerStopped is returned when the worker is already stopped.
-	ErrWorkerStopped = errors.New("worker already stopped")
-
 	// ErrReconnectBackOffStopped is returned when the reconnection backoff policy indicates no more retries should be attempted.
 	ErrReconnectBackOffStopped = errors.New("reconnect backoff policy indicates no more retries")
 
@@ -177,11 +174,10 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 		doneC: workerDoneC,
 	}
 	controller.stop = func(ctx context.Context) error {
-		if workerCtx.Err() != nil {
-			return errors.Wrap(ErrWorkerStopped, "worker already stopped")
-		}
+		// Always try to cancel the worker context
 		workerCancel(nil)
 
+		// Always wait for the worker to actually stop, regardless of who initiated the cancellation
 		workerMu.RLock()
 		workerToStop := worker
 		workerMu.RUnlock()
@@ -194,6 +190,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 			}
 		}
 
+		// Wait for worker goroutine to finish - this ensures true idempotency
 		select {
 		case <-workerDoneC:
 			return nil
@@ -223,7 +220,7 @@ func (c *workerController) Done() <-chan struct{} {
 func (c *workerController) Err() error {
 	err := context.Cause(c.ctx)
 	if errors.Is(err, context.Canceled) { // if no cause
-		return ErrWorkerStopped // ensure not nil
+		return nil // Normal shutdown, not an error
 	}
 	return err
 }

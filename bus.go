@@ -81,37 +81,7 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 	if opts.WorkerConfig.ReconnectBackOff != nil {
 		workerOpts = append(workerOpts, quex.WithReconnectBackOff(opts.WorkerConfig.ReconnectBackOff))
 	}
-	controller, err := quex.StartWorker(ctx, workerOptions, workerOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return &consumer{controller: controller}, nil
-}
-
-// consumer adapts a quex.WorkerController to the Consumer interface
-// and ensures consistent error handling, particularly for stopped errors.
-type consumer struct {
-	controller quex.WorkerController
-}
-
-func (w *consumer) Stop(ctx context.Context) error {
-	err := w.controller.Stop(ctx)
-	if errors.Is(err, quex.ErrWorkerStopped) {
-		return errors.WithStack(ErrConsumerStopped)
-	}
-	return err
-}
-
-func (w *consumer) Done() <-chan struct{} {
-	return w.controller.Done()
-}
-
-func (w *consumer) Err() error {
-	err := w.controller.Err()
-	if errors.Is(err, quex.ErrWorkerStopped) {
-		return errors.WithStack(ErrConsumerStopped)
-	}
-	return err
+	return quex.StartWorker(ctx, workerOptions, workerOpts...)
 }
 
 var _ Bus = (*BusImpl)(nil)

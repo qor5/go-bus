@@ -173,7 +173,8 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 	}() // nolint:errcheck
 
 	controller := &workerController{
-		ctx: workerCtx,
+		ctx:   workerCtx,
+		doneC: workerDoneC,
 	}
 	controller.stop = func(ctx context.Context) error {
 		if workerCtx.Err() != nil {
@@ -206,8 +207,9 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 
 // workerController implements the WorkerController interface.
 type workerController struct {
-	ctx  context.Context
-	stop func(ctx context.Context) error
+	ctx   context.Context
+	stop  func(ctx context.Context) error
+	doneC <-chan struct{}
 }
 
 func (c *workerController) Stop(ctx context.Context) error {
@@ -215,7 +217,7 @@ func (c *workerController) Stop(ctx context.Context) error {
 }
 
 func (c *workerController) Done() <-chan struct{} {
-	return c.ctx.Done()
+	return c.doneC
 }
 
 func (c *workerController) Err() error {

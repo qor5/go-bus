@@ -12,9 +12,6 @@ import (
 )
 
 var (
-	// ErrWorkerStopped is returned when the worker is already stopped.
-	ErrWorkerStopped = errors.New("worker already stopped")
-
 	// ErrReconnectBackOffStopped is returned when the reconnection backoff policy indicates no more retries should be attempted.
 	ErrReconnectBackOffStopped = errors.New("reconnect backoff policy indicates no more retries")
 
@@ -118,9 +115,9 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 		// Ensure worker lifecycle ends when goroutine exits for any reason
 		defer func() {
 			if xerr != nil {
-				logger.Error("worker stopped with error", "error", xerr)
+				logger.ErrorContext(workerCtx, "worker stopped with error", "error", xerr)
 			} else {
-				logger.Info("worker stopped")
+				logger.InfoContext(workerCtx, "worker stopped")
 			}
 			workerCancel(xerr)
 		}()
@@ -139,7 +136,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 				return nil
 			}
 
-			logger.Warn("worker error, will attempt to recreate", "error", err)
+			logger.WarnContext(workerCtx, "worker error, will attempt to recreate", "error", err)
 
 			nextBackOff := reconnectBackOff.NextBackOff()
 			if nextBackOff == backoff.Stop {
@@ -166,21 +163,21 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 			currentWorker = newWorker
 			workerMu.Unlock()
 
-			logger.Info("worker successfully recreated")
+			logger.InfoContext(workerCtx, "worker successfully recreated")
 
 			reconnectBackOff.Reset()
 		}
 	}() // nolint:errcheck
 
 	controller := &workerController{
-		ctx: workerCtx,
+		ctx:   workerCtx,
+		doneC: workerDoneC,
 	}
 	controller.stop = func(ctx context.Context) error {
-		if workerCtx.Err() != nil {
-			return errors.Wrap(ErrWorkerStopped, "worker already stopped")
-		}
+		// Always try to cancel the worker context
 		workerCancel(nil)
 
+		// Always wait for the worker to actually stop, regardless of who initiated the cancellation
 		workerMu.RLock()
 		workerToStop := worker
 		workerMu.RUnlock()
@@ -188,11 +185,12 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 		if workerToStop != nil {
 			err := workerToStop.Stop(ctx)
 			if err != nil {
-				logger.Warn("error stopping worker", "error", err)
+				logger.WarnContext(ctx, "error stopping worker", "error", err)
 				return err
 			}
 		}
 
+		// Wait for worker goroutine to finish - this ensures true idempotency
 		select {
 		case <-workerDoneC:
 			return nil
@@ -206,8 +204,9 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 
 // workerController implements the WorkerController interface.
 type workerController struct {
-	ctx  context.Context
-	stop func(ctx context.Context) error
+	ctx   context.Context
+	stop  func(ctx context.Context) error
+	doneC <-chan struct{}
 }
 
 func (c *workerController) Stop(ctx context.Context) error {
@@ -215,13 +214,13 @@ func (c *workerController) Stop(ctx context.Context) error {
 }
 
 func (c *workerController) Done() <-chan struct{} {
-	return c.ctx.Done()
+	return c.doneC
 }
 
 func (c *workerController) Err() error {
 	err := context.Cause(c.ctx)
 	if errors.Is(err, context.Canceled) { // if no cause
-		return ErrWorkerStopped // ensure not nil
+		return nil // Normal shutdown, not an error
 	}
 	return err
 }

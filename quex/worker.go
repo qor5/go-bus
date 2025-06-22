@@ -115,9 +115,9 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 		// Ensure worker lifecycle ends when goroutine exits for any reason
 		defer func() {
 			if xerr != nil {
-				logger.ErrorContext(workerCtx, "worker stopped with error", "error", xerr)
+				logger.ErrorContext(workerCtx, "Worker stopped with error", "error", xerr)
 			} else {
-				logger.InfoContext(workerCtx, "worker stopped")
+				logger.InfoContext(workerCtx, "Worker stopped")
 			}
 			workerCancel(xerr)
 		}()
@@ -136,7 +136,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 				return nil
 			}
 
-			logger.WarnContext(workerCtx, "worker error, will attempt to recreate", "error", err)
+			logger.WarnContext(workerCtx, "Worker error, will attempt to recreate", "error", err)
 
 			nextBackOff := reconnectBackOff.NextBackOff()
 			if nextBackOff == backoff.Stop {
@@ -163,7 +163,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 			currentWorker = newWorker
 			workerMu.Unlock()
 
-			logger.InfoContext(workerCtx, "worker successfully recreated")
+			logger.InfoContext(workerCtx, "Worker successfully recreated")
 
 			reconnectBackOff.Reset()
 		}
@@ -185,7 +185,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 		if workerToStop != nil {
 			err := workerToStop.Stop(ctx)
 			if err != nil {
-				logger.WarnContext(ctx, "error stopping worker", "error", err)
+				logger.WarnContext(ctx, "Error stopping worker", "error", err)
 				return err
 			}
 		}

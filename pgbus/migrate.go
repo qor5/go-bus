@@ -103,7 +103,6 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errors.Wrap(err, "failed to create subscriptions table and indexes")
 		}
-
 		return nil
 	}
 	for attempts := 0; attempts < MaxMigrationAttempts; attempts++ {
@@ -111,8 +110,12 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if err == nil {
 			return nil
 		}
-		if strings.Contains(err.Error(), `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`) ||
-			strings.Contains(err.Error(), "already exists (SQLSTATE 42P07)") {
+		if attempts == MaxMigrationAttempts-1 {
+			return err
+		}
+		errMsg := err.Error()
+		if strings.Contains(errMsg, `duplicate key value violates unique constraint`) ||
+			strings.Contains(errMsg, "already exists (SQLSTATE 42P07)") {
 			select {
 			case <-ctx.Done():
 				return errors.Wrap(ctx.Err(), "failed to migrate")

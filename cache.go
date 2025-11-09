@@ -40,6 +40,7 @@ func (c *ristrettoCache) Set(key string, value []Subscription) {
 
 func (c *ristrettoCache) Del(key string) {
 	c.cache.Del(c.scope + ":" + key)
+	c.cache.Wait()
 }
 
 func (c *ristrettoCache) Clear() {

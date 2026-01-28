@@ -34,7 +34,7 @@ type Message struct {
 	Header Header `json:"header"`
 
 	// Payload is the actual content of the message.
-	Payload []byte `json:"payload"`
+	Payload any `json:"payload"`
 }
 
 type Outbound struct {
@@ -83,12 +83,9 @@ type Bus interface {
 	// Queue returns a queue with the specified name.
 	Queue(name string) Queue
 
-	// Publish sends a payload to all queues with subscriptions matching the subject.
-	Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) (*Dispatch, error)
-
-	// Dispatch sends outbound messages to all queues with subscriptions matching the subject.
+	// Publish sends outbound messages to all queues with subscriptions matching the subject.
 	// All messages are processed in a single transaction.
-	Dispatch(ctx context.Context, msgs ...*Outbound) (*Dispatch, error)
+	Publish(ctx context.Context, msgs ...*Outbound) (*Dispatch, error)
 
 	// BySubject returns all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)

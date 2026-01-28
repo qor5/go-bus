@@ -231,22 +231,3 @@ func WithDialectDecorator(decorators ...DialectDecorator) BusOption {
 		}
 	}
 }
-
-type PublishOptions struct {
-	Header   Header
-	UniqueID func(msg *Outbound) string
-}
-
-type PublishOption func(*PublishOptions)
-
-func WithHeader(header Header) PublishOption {
-	return func(opts *PublishOptions) {
-		opts.Header = header
-	}
-}
-
-func WithUniqueID(v string) PublishOption {
-	return func(opts *PublishOptions) {
-		opts.UniqueID = UniqueID(v)
-	}
-}

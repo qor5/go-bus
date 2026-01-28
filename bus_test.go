@@ -3,6 +3,7 @@ package bus_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -381,7 +382,12 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		result, err := b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
+		result, err := b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: json.RawMessage(`["test_payload"]`),
+			},
+		})
 		assert.NoError(t, err, "Valid publish should not error")
 		assert.NotNil(t, result, "Publish result should not be nil")
 		assert.Greater(t, len(result.JobIDs()), 0, "Should create at least one job")
@@ -395,7 +401,7 @@ func TestPublish(t *testing.T) {
 			msg, err := bus.InboundFromArgs(job.Args)
 			require.NoError(t, err, "Failed to parse message from args")
 			assert.Equal(t, "orders.new", msg.Subject, "Message subject mismatch")
-			assert.Equal(t, []byte(`["test_payload"]`), msg.Payload, "Message payload mismatch")
+			assert.Equal(t, json.RawMessage(`["test_payload"]`), msg.Payload, "Message payload mismatch")
 		}
 	})
 
@@ -403,7 +409,12 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		_, err = b.Publish(ctx, "orders.item123.processed", []byte(`["wildcard_payload"]`))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.item123.processed",
+				Payload: json.RawMessage(`["wildcard_payload"]`),
+			},
+		})
 		assert.NoError(t, err, "Wildcard match publish should not error")
 
 		// Verify jobs were created - should create 1 job in queue1
@@ -415,7 +426,7 @@ func TestPublish(t *testing.T) {
 		msg, err := bus.InboundFromArgs(job.Args)
 		require.NoError(t, err, "Failed to parse message from args")
 		assert.Equal(t, "orders.item123.processed", msg.Subject, "Message subject mismatch")
-		assert.Equal(t, []byte(`["wildcard_payload"]`), msg.Payload, "Message payload mismatch")
+		assert.Equal(t, json.RawMessage(`["wildcard_payload"]`), msg.Payload, "Message payload mismatch")
 		// Verify pattern is set
 		assert.Contains(t, msg.Header.Get(bus.HeaderSubscriptionPattern), "orders.*", "Message pattern should contain the matching pattern")
 	})
@@ -424,7 +435,12 @@ func TestPublish(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		_, err = b.Publish(ctx, "notifications.user.login", []byte(`["multilevel_payload"]`))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "notifications.user.login",
+				Payload: json.RawMessage(`["multilevel_payload"]`),
+			},
+		})
 		assert.NoError(t, err, "Multi-level wildcard match publish should not error")
 
 		// Verify jobs were created - should create 1 job in queue2
@@ -436,13 +452,13 @@ func TestPublish(t *testing.T) {
 		msg, err := bus.InboundFromArgs(job.Args)
 		require.NoError(t, err, "Failed to parse message from args")
 		assert.Equal(t, "notifications.user.login", msg.Subject, "Message subject mismatch")
-		assert.Equal(t, []byte(`["multilevel_payload"]`), msg.Payload, "Message payload mismatch")
+		assert.Equal(t, json.RawMessage(`["multilevel_payload"]`), msg.Payload, "Message payload mismatch")
 		// Verify pattern is set
 		assert.Equal(t, "notifications.>", msg.Header.Get(bus.HeaderSubscriptionPattern), "Message pattern should be the matching pattern")
 	})
 
-	// Test Dispatch API
-	t.Run("Dispatch", func(t *testing.T) {
+	// Test Publish API
+	t.Run("Publish", func(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
@@ -450,12 +466,12 @@ func TestPublish(t *testing.T) {
 			Message: bus.Message{
 				Subject: "orders.new",
 				Header:  bus.Header{"test": []string{"value"}},
-				Payload: []byte(`["message_test_payload"]`),
+				Payload: json.RawMessage(`["message_test_payload"]`),
 			},
 		}
 
-		_, err = b.Dispatch(ctx, outbound)
-		assert.NoError(t, err, "Valid Dispatch should not error")
+		_, err = b.Publish(ctx, outbound)
+		assert.NoError(t, err, "Valid Publish should not error")
 
 		// Verify jobs were created - should create 1 jobs (for "orders.new")
 		jobs := getQueueJobs(t, testQueue)
@@ -466,12 +482,51 @@ func TestPublish(t *testing.T) {
 			msg, err := bus.InboundFromArgs(job.Args)
 			require.NoError(t, err, "Failed to parse message from args")
 			assert.Equal(t, "orders.new", msg.Subject, "Message subject mismatch")
-			assert.Equal(t, []byte(`["message_test_payload"]`), msg.Payload, "Message payload mismatch")
+			assert.Equal(t, json.RawMessage(`["message_test_payload"]`), msg.Payload, "Message payload mismatch")
 			assert.Equal(t, "value", msg.Header.Get("test"), "Message header should include test value")
 		}
 	})
 
-	t.Run("BatchDispatch", func(t *testing.T) {
+	t.Run("ScalarPayloads", func(t *testing.T) {
+		cleanupJobs(t)
+
+		_, err = b.Publish(ctx,
+			&bus.Outbound{Message: bus.Message{Subject: "orders.new", Payload: "hello"}},
+			&bus.Outbound{Message: bus.Message{Subject: "orders.item999.processed", Payload: 42}},
+			&bus.Outbound{Message: bus.Message{Subject: "orders.binary", Payload: []byte("bin")}},
+		)
+		require.NoError(t, err, "Publish should not error for scalar payloads")
+
+		jobs := getQueueJobs(t, testQueue)
+		require.Len(t, jobs, 3, "Should create 3 jobs for scalar payloads")
+
+		for _, job := range jobs {
+			msg, err := bus.InboundFromArgs(job.Args)
+			require.NoError(t, err, "Failed to parse message from args")
+
+			raw, ok := msg.Payload.(json.RawMessage)
+			require.True(t, ok, "Payload should be json.RawMessage")
+
+			switch msg.Subject {
+			case "orders.new":
+				var s string
+				require.NoError(t, json.Unmarshal(raw, &s))
+				assert.Equal(t, "hello", s, "String payload mismatch")
+			case "orders.item999.processed":
+				var n int
+				require.NoError(t, json.Unmarshal(raw, &n))
+				assert.Equal(t, 42, n, "Int payload mismatch")
+			case "orders.binary":
+				var b []byte
+				require.NoError(t, json.Unmarshal(raw, &b))
+				assert.Equal(t, []byte("bin"), b, "[]byte payload mismatch")
+			default:
+				t.Fatalf("Unexpected subject %s", msg.Subject)
+			}
+		}
+	})
+
+	t.Run("BatchPublish", func(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
@@ -480,7 +535,7 @@ func TestPublish(t *testing.T) {
 			Message: bus.Message{
 				Subject: "orders.new",
 				Header:  bus.Header{"batch": []string{"1"}},
-				Payload: []byte(`["batch_order_payload"]`),
+				Payload: json.RawMessage(`["batch_order_payload"]`),
 			},
 		}
 
@@ -488,7 +543,7 @@ func TestPublish(t *testing.T) {
 			Message: bus.Message{
 				Subject: "notifications.user.login",
 				Header:  bus.Header{"batch": []string{"2"}},
-				Payload: []byte(`["batch_notification_payload"]`),
+				Payload: json.RawMessage(`["batch_notification_payload"]`),
 			},
 		}
 
@@ -497,13 +552,13 @@ func TestPublish(t *testing.T) {
 			Message: bus.Message{
 				Subject: "orders.item456.processed",
 				Header:  bus.Header{"batch": []string{"3"}},
-				Payload: []byte(`["batch_processed_payload"]`),
+				Payload: json.RawMessage(`["batch_processed_payload"]`),
 			},
 		}
 
-		// Dispatch multiple messages in a single call
-		_, err = b.Dispatch(ctx, ordersMsg, notificationMsg, orderProcessedMsg)
-		assert.NoError(t, err, "Batch Dispatch should not error")
+		// Publish multiple messages in a single call
+		_, err = b.Publish(ctx, ordersMsg, notificationMsg, orderProcessedMsg)
+		assert.NoError(t, err, "Batch Publish should not error")
 
 		// Verify jobs were created in queue1 (should have orders.new and orders.*.processed)
 		queue1Jobs := getQueueJobs(t, testQueue)
@@ -514,27 +569,27 @@ func TestPublish(t *testing.T) {
 		assert.Equal(t, 1, len(queue2Jobs), "Should create exactly 1 job in queue2")
 
 		// Verify job contents - Map subjects to payloads for easier verification
-		messageMap := make(map[string][]byte)
+		messageMap := make(map[string]json.RawMessage)
 		headerMap := make(map[string]string)
 
 		for _, job := range queue1Jobs {
 			msg, err := bus.InboundFromArgs(job.Args)
 			require.NoError(t, err, "Failed to parse message from args")
-			messageMap[msg.Subject] = msg.Payload
+			messageMap[msg.Subject] = msg.Payload.(json.RawMessage)
 			headerMap[msg.Subject] = msg.Header.Get("batch")
 		}
 
 		for _, job := range queue2Jobs {
 			msg, err := bus.InboundFromArgs(job.Args)
 			require.NoError(t, err, "Failed to parse message from args")
-			messageMap[msg.Subject] = msg.Payload
+			messageMap[msg.Subject] = msg.Payload.(json.RawMessage)
 			headerMap[msg.Subject] = msg.Header.Get("batch")
 		}
 
 		// Verify all messages were delivered with correct content
-		assert.Equal(t, []byte(`["batch_order_payload"]`), messageMap["orders.new"], "orders.new payload mismatch")
-		assert.Equal(t, []byte(`["batch_processed_payload"]`), messageMap["orders.item456.processed"], "orders.item456.processed payload mismatch")
-		assert.Equal(t, []byte(`["batch_notification_payload"]`), messageMap["notifications.user.login"], "notifications.user.login payload mismatch")
+		assert.Equal(t, json.RawMessage(`["batch_order_payload"]`), messageMap["orders.new"], "orders.new payload mismatch")
+		assert.Equal(t, json.RawMessage(`["batch_processed_payload"]`), messageMap["orders.item456.processed"], "orders.item456.processed payload mismatch")
+		assert.Equal(t, json.RawMessage(`["batch_notification_payload"]`), messageMap["notifications.user.login"], "notifications.user.login payload mismatch")
 
 		// Verify headers were preserved
 		assert.Equal(t, "1", headerMap["orders.new"], "orders.new header mismatch")
@@ -542,13 +597,13 @@ func TestPublish(t *testing.T) {
 		assert.Equal(t, "2", headerMap["notifications.user.login"], "notifications.user.login header mismatch")
 	})
 
-	t.Run("EmptyBatchDispatch", func(t *testing.T) {
+	t.Run("EmptyBatchPublish", func(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
-		// Dispatch with empty slice should not error
-		_, err = b.Dispatch(ctx)
-		assert.NoError(t, err, "Empty Dispatch should not error")
+		// Publish with empty slice should not error
+		_, err = b.Publish(ctx)
+		assert.NoError(t, err, "Empty Publish should not error")
 
 		// Verify no jobs were created
 		queue1Jobs := getQueueJobs(t, testQueue)
@@ -557,7 +612,7 @@ func TestPublish(t *testing.T) {
 		assert.Equal(t, 0, len(queue2Jobs), "Should not create jobs in queue2 for empty dispatch")
 	})
 
-	t.Run("BatchDispatchWithInvalidMessage", func(t *testing.T) {
+	t.Run("BatchPublishWithInvalidMessage", func(t *testing.T) {
 		// Clear previous jobs
 		cleanupJobs(t)
 
@@ -565,7 +620,7 @@ func TestPublish(t *testing.T) {
 		validMsg := &bus.Outbound{
 			Message: bus.Message{
 				Subject: "orders.new",
-				Payload: []byte(`["valid_payload"]`),
+				Payload: json.RawMessage(`["valid_payload"]`),
 			},
 		}
 
@@ -573,13 +628,13 @@ func TestPublish(t *testing.T) {
 		invalidMsg := &bus.Outbound{
 			Message: bus.Message{
 				Subject: "", // Invalid empty subject
-				Payload: []byte(`["invalid_payload"]`),
+				Payload: json.RawMessage(`["invalid_payload"]`),
 			},
 		}
 
-		// Dispatch should fail with invalid message
-		_, err = b.Dispatch(ctx, validMsg, invalidMsg)
-		assert.Error(t, err, "Batch Dispatch with invalid message should error")
+		// Publish should fail with invalid message
+		_, err = b.Publish(ctx, validMsg, invalidMsg)
+		assert.Error(t, err, "Batch Publish with invalid message should error")
 
 		// Verify no jobs were created due to transaction rollback
 		queue1Jobs := getQueueJobs(t, testQueue)
@@ -591,7 +646,12 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Depending on the implementation, this may or may not return an error
-		_, _ = b.Publish(ctx, "unknown.topic", []byte(`["test_payload"]`))
+		_, _ = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "unknown.topic",
+				Payload: json.RawMessage(`["test_payload"]`),
+			},
+		})
 
 		// Verify no jobs were created
 		queue1Jobs := getQueueJobs(t, testQueue)
@@ -605,7 +665,12 @@ func TestPublish(t *testing.T) {
 		cleanupJobs(t)
 
 		// Depending on the implementation, this may or may not return an error
-		_, err = b.Publish(ctx, "orders.new", []byte{})
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: json.RawMessage(`[]`),
+			},
+		})
 		// Log errors if they occur, but don't assert error expectations
 		if err != nil {
 			t.Logf("Publish with empty payload returned: %v", err)
@@ -616,6 +681,190 @@ func TestPublish(t *testing.T) {
 		if len(jobs) > 0 {
 			t.Logf("Created %d jobs despite empty payload", len(jobs))
 		}
+	})
+
+	t.Run("PublishMethods_AllExecuted", func(t *testing.T) {
+		cleanupAllTables()
+
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		queue1 := b.Queue(testQueue)
+		queue2 := b.Queue(testQueue2)
+
+		_, err = queue1.Subscribe(ctx, "orders.new")
+		require.NoError(t, err, "Failed to subscribe")
+
+		_, err = queue2.Subscribe(ctx, "notifications.>")
+		require.NoError(t, err, "Failed to subscribe")
+
+		ordersMsg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: json.RawMessage(`{"order":"payload"}`),
+			},
+		}
+
+		notificationMsg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "notifications.user.login",
+				Payload: json.RawMessage(`{"notification":"payload"}`),
+			},
+		}
+
+		result, err := b.Publish(ctx, ordersMsg, notificationMsg)
+		require.NoError(t, err, "Publish should not error")
+		require.NotNil(t, result, "Publish result should not be nil")
+
+		assert.Equal(t, 2, result.MatchedCount(), "Should have 2 matched subscriptions")
+		assert.Equal(t, 2, result.ExecutedCount(), "Should have 2 executed subscriptions")
+
+		jobIDs := result.JobIDs()
+		assert.Equal(t, 2, len(jobIDs), "Should have 2 job IDs")
+		for _, id := range jobIDs {
+			assert.Greater(t, id, int64(0), "Job ID should be positive")
+		}
+
+		skippedOverlap := result.SkippedByOverlap()
+		assert.Empty(t, skippedOverlap, "Should have no skipped by overlap")
+
+		skippedConflict := result.SkippedByConflict()
+		assert.Empty(t, skippedConflict, "Should have no skipped by conflict")
+	})
+
+	t.Run("PublishMethods_WithOverlappingPatterns", func(t *testing.T) {
+		cleanupAllTables()
+
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		queue1 := b.Queue(testQueue)
+
+		_, err = queue1.Subscribe(ctx, "orders.new")
+		require.NoError(t, err, "Failed to subscribe to exact pattern")
+
+		_, err = queue1.Subscribe(ctx, "orders.*")
+		require.NoError(t, err, "Failed to subscribe to wildcard pattern")
+
+		msg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: json.RawMessage(`{"overlapping":"payload"}`),
+			},
+		}
+
+		result, err := b.Publish(ctx, msg)
+		require.NoError(t, err, "Publish should not error")
+		require.NotNil(t, result, "Publish result should not be nil")
+
+		assert.Equal(t, 2, result.MatchedCount(), "Should have 2 matched subscriptions (overlapping)")
+		assert.Equal(t, 1, result.ExecutedCount(), "Should have 1 executed subscription (first one)")
+
+		jobIDs := result.JobIDs()
+		assert.Equal(t, 1, len(jobIDs), "Should have 1 job ID")
+
+		skippedOverlap := result.SkippedByOverlap()
+		assert.Equal(t, 1, len(skippedOverlap), "Should have 1 skipped by overlap")
+		assert.Equal(t, bus.ExecutionStatusSkippedOverlap, skippedOverlap[0].Status, "Status should be skipped overlap")
+
+		skippedConflict := result.SkippedByConflict()
+		assert.Empty(t, skippedConflict, "Should have no skipped by conflict")
+	})
+
+	t.Run("PublishMethods_EmptyPublish", func(t *testing.T) {
+		cleanupAllTables()
+
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		result, err := b.Publish(ctx)
+		require.NoError(t, err, "Empty publish should not error")
+		require.NotNil(t, result, "Publish result should not be nil")
+
+		assert.Equal(t, 0, result.MatchedCount(), "Empty publish should have 0 matched count")
+		assert.Equal(t, 0, result.ExecutedCount(), "Empty publish should have 0 executed count")
+		assert.Empty(t, result.JobIDs(), "Empty publish should have no job IDs")
+		assert.Empty(t, result.SkippedByOverlap(), "Empty publish should have no skipped by overlap")
+		assert.Empty(t, result.SkippedByConflict(), "Empty publish should have no skipped by conflict")
+	})
+
+	t.Run("PublishMethods_NoMatchingSubscriptions", func(t *testing.T) {
+		cleanupAllTables()
+
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		queue1 := b.Queue(testQueue)
+		_, err = queue1.Subscribe(ctx, "orders.new")
+		require.NoError(t, err, "Failed to subscribe")
+
+		msg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "notifications.user.login",
+				Payload: json.RawMessage(`{"no_match":"payload"}`),
+			},
+		}
+
+		result, err := b.Publish(ctx, msg)
+		require.NoError(t, err, "Publish should not error")
+		require.NotNil(t, result, "Publish result should not be nil")
+
+		assert.Equal(t, 0, result.MatchedCount(), "Should have 0 matched subscriptions")
+		assert.Equal(t, 0, result.ExecutedCount(), "Should have 0 executed subscriptions")
+		assert.Empty(t, result.JobIDs(), "Should have no job IDs")
+		assert.Empty(t, result.SkippedByOverlap(), "Should have no skipped by overlap")
+		assert.Empty(t, result.SkippedByConflict(), "Should have no skipped by conflict")
+	})
+
+	t.Run("PublishMethods_WithUniqueConstraintConflict", func(t *testing.T) {
+		cleanupAllTables()
+
+		b, err := pgbus.New(db)
+		require.NoError(t, err, "Failed to create Bus instance")
+
+		ctx := context.Background()
+
+		queue1 := b.Queue(testQueue)
+		_, err = queue1.Subscribe(ctx, "orders.new", bus.WithPlanConfig(&bus.PlanConfig{
+			UniqueLifecycle: que.Always,
+		}))
+		require.NoError(t, err, "Failed to subscribe with unique constraint")
+
+		msg := &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: json.RawMessage(`{"unique":"payload"}`),
+			},
+			UniqueID: func(m *bus.Outbound) string {
+				return "test-unique-id"
+			},
+		}
+
+		result1, err := b.Publish(ctx, msg)
+		require.NoError(t, err, "First publish should not error")
+		assert.Equal(t, 1, result1.ExecutedCount(), "First publish should execute")
+		assert.Equal(t, 1, len(result1.JobIDs()), "First publish should create job")
+
+		result2, err := b.Publish(ctx, msg)
+		require.NoError(t, err, "Second publish should not error")
+
+		assert.Equal(t, 1, result2.MatchedCount(), "Should have 1 matched subscription")
+		assert.Equal(t, 0, result2.ExecutedCount(), "Should have 0 executed subscriptions due to conflict")
+		assert.Empty(t, result2.JobIDs(), "Should have no job IDs due to conflict")
+		assert.Empty(t, result2.SkippedByOverlap(), "Should have no skipped by overlap")
+
+		skippedConflict := result2.SkippedByConflict()
+		assert.Equal(t, 1, len(skippedConflict), "Should have 1 skipped by conflict")
+		assert.Equal(t, bus.ExecutionStatusSkippedConflict, skippedConflict[0].Status, "Status should be skipped conflict")
+		assert.Nil(t, skippedConflict[0].JobID, "JobID should be nil for conflicted execution")
 	})
 }
 
@@ -676,14 +925,20 @@ func TestConsume(t *testing.T) {
 	defer func() { _ = consumer.Stop(context.Background()) }()
 
 	// Publish a message with header
-	testPayload := []byte(`["consume_test_payload"]`)
+	testPayload := json.RawMessage(`["consume_test_payload"]`)
 	// Use mixed case header keys to test canonicalization
 	testHeader := bus.Header{
 		"test-header":     []string{"test"},
 		"Content-Type":    []string{"application/json"},
 		"x-custom-HEADER": []string{"value"},
 	}
-	_, err = b.Publish(ctx, "test.topic", testPayload, bus.WithHeader(testHeader))
+	_, err = b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: "test.topic",
+			Header:  testHeader,
+			Payload: testPayload,
+		},
+	})
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for message or timeout
@@ -732,8 +987,13 @@ func TestConsumeWithOptions(t *testing.T) {
 	defer func() { _ = consumer.Stop(context.Background()) }()
 
 	// Publish a message
-	testPayload := []byte(`["options_test_payload"]`)
-	_, err = b.Publish(ctx, "test.options", testPayload)
+	testPayload := json.RawMessage(`["options_test_payload"]`)
+	_, err = b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: "test.options",
+			Payload: testPayload,
+		},
+	})
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for message or timeout
@@ -807,8 +1067,13 @@ func TestMultipleConsumers(t *testing.T) {
 	assert.NotNil(t, consumer3, "Third consumer on queue2 should not be nil")
 
 	// Publish a message to the test topic
-	testPayload := []byte(`["multiconsumer_test"]`)
-	_, err = b.Publish(ctx, testTopic, testPayload)
+	testPayload := json.RawMessage(`["multiconsumer_test"]`)
+	_, err = b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: testTopic,
+			Payload: testPayload,
+		},
+	})
 	require.NoError(t, err, "Failed to publish message")
 
 	// Wait for messages to be received with a fixed timeout
@@ -1011,12 +1276,12 @@ func TestMultiQueueSubscription(t *testing.T) {
 	t.Logf("[%s] BySubject call took %s", time.Since(startTime), time.Since(bySubjectStartTime))
 
 	// Publish a message that matches 3 of the 4 patterns
-	testPayload := []byte(`["multi_queue_payload"]`)
+	testPayload := json.RawMessage(`["multi_queue_payload"]`)
 	testHeader := bus.Header{"content-type": []string{"application/json"}}
 
 	t.Logf("[%s] Publishing first message...", time.Since(startTime))
 	publishStartTime := time.Now()
-	_, err = b.Dispatch(ctx, &bus.Outbound{
+	_, err = b.Publish(ctx, &bus.Outbound{
 		Message: bus.Message{
 			Subject: testSubject,
 			Header:  testHeader,
@@ -1104,7 +1369,12 @@ func TestMultiQueueSubscription(t *testing.T) {
 	// Publish the same message again
 	t.Logf("[%s] Publishing second message...", time.Since(startTime))
 	publish2StartTime := time.Now()
-	_, err = b.Publish(ctx, testSubject, testPayload)
+	_, err = b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: testSubject,
+			Payload: testPayload,
+		},
+	})
 	require.NoError(t, err, "Failed to publish second message")
 	t.Logf("[%s] Second publish took %s", time.Since(startTime), time.Since(publish2StartTime))
 
@@ -1774,11 +2044,21 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 	require.NoError(t, err, "Failed to subscribe")
 
 	// Publish messages to create jobs
-	result, err := b.Publish(ctx, "orders.new", []byte(`["test_payload"]`))
+	result, err := b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: "orders.new",
+			Payload: json.RawMessage(`["test_payload"]`),
+		},
+	})
 	require.NoError(t, err, "Failed to publish message")
 	require.NotNil(t, result, "Publish result should not be nil")
 
-	result2, err := b.Publish(ctx, "notifications.user.login", []byte(`["notification_payload"]`))
+	result2, err := b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: "notifications.user.login",
+			Payload: json.RawMessage(`["notification_payload"]`),
+		},
+	})
 	require.NoError(t, err, "Failed to publish message")
 	require.NotNil(t, result2, "Publish result should not be nil")
 
@@ -1827,6 +2107,77 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 	err = rows3.Scan(&count3)
 	require.NoError(t, err, "Failed to scan count")
 	assert.Equal(t, 0, count3, "Should return 0 for non-existent subscription ID")
+
+	// Query jobs where header array contains subscription ID
+	rows4, err := db.QueryContext(ctx, `
+		SELECT COUNT(*)
+		FROM goque_jobs
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier' ? $1
+	`, sub1.ID())
+	require.NoError(t, err, "Failed to query jobs by subscription ID containment")
+	defer rows4.Close()
+
+	var count4 int
+	require.True(t, rows4.Next())
+	err = rows4.Scan(&count4)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 1, count4, "Should find 1 job for sub1 using array containment")
+
+	rows5, err := db.QueryContext(ctx, `
+		SELECT COUNT(*)
+		FROM goque_jobs
+		WHERE args::jsonb->0->'header'->'Subscription-Identifier' @> $1::jsonb
+	`, fmt.Sprintf("[%q]", sub2.ID()))
+	require.NoError(t, err, "Failed to query jobs by subscription ID containment with @>")
+	defer rows5.Close()
+
+	var count5 int
+	require.True(t, rows5.Next())
+	err = rows5.Scan(&count5)
+	require.NoError(t, err, "Failed to scan count")
+	assert.Equal(t, 1, count5, "Should find 1 job for sub2 using @> containment")
+}
+
+func TestQueryJobsByPayload(t *testing.T) {
+	cleanupAllTables()
+
+	b, err := pgbus.New(db)
+	require.NoError(t, err, "Failed to create Bus instance")
+
+	ctx := context.Background()
+
+	queue := b.Queue(testQueue)
+	_, err = queue.Subscribe(ctx, "orders.new")
+	require.NoError(t, err, "Failed to subscribe")
+
+	structPayload := struct {
+		ID string `json:"id"`
+	}{ID: "struct-123"}
+	rawPayload := json.RawMessage(`{"id":"raw-456"}`)
+
+	_, err = b.Publish(ctx,
+		&bus.Outbound{Message: bus.Message{Subject: "orders.new", Payload: structPayload}},
+		&bus.Outbound{Message: bus.Message{Subject: "orders.new", Payload: rawPayload}},
+	)
+	require.NoError(t, err, "Failed to publish messages")
+
+	row := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM goque_jobs
+		WHERE args::jsonb->0->'payload'->>'id' = $1
+	`, "struct-123")
+	var countStruct int
+	require.NoError(t, row.Scan(&countStruct), "Failed to scan struct payload count")
+	assert.Equal(t, 1, countStruct, "Should find 1 job for struct payload")
+
+	row = db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM goque_jobs
+		WHERE args::jsonb->0->'payload'->>'id' = $1
+	`, "raw-456")
+	var countRaw int
+	require.NoError(t, row.Scan(&countRaw), "Failed to scan raw payload count")
+	assert.Equal(t, 1, countRaw, "Should find 1 job for raw payload")
 }
 
 // TestSubscriptionDrain tests the Drain method functionality
@@ -1853,13 +2204,28 @@ func TestSubscriptionDrain(t *testing.T) {
 		require.NoError(t, err, "Failed to subscribe to pattern")
 
 		// Publish messages that will create jobs
-		_, err = b.Publish(ctx, "test.drain.message1", []byte("payload1"))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "test.drain.message1",
+				Payload: "payload1",
+			},
+		})
 		require.NoError(t, err, "Failed to publish message1")
 
-		_, err = b.Publish(ctx, "test.drain.message2", []byte("payload2"))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "test.drain.message2",
+				Payload: "payload2",
+			},
+		})
 		require.NoError(t, err, "Failed to publish message2")
 
-		_, err = b.Publish(ctx, "test.drain.specific", []byte("payload3"))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "test.drain.specific",
+				Payload: "payload3",
+			},
+		})
 		require.NoError(t, err, "Failed to publish message3")
 
 		// Verify jobs were created
@@ -1916,13 +2282,28 @@ func TestSubscriptionDrain(t *testing.T) {
 		require.NoError(t, err, "Failed to subscribe to events.*")
 
 		// Publish messages to different subjects
-		_, err = b.Publish(ctx, "orders.new", []byte("order_payload"))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.new",
+				Payload: "order_payload",
+			},
+		})
 		require.NoError(t, err, "Failed to publish order message")
 
-		_, err = b.Publish(ctx, "orders.updated", []byte("order_update_payload"))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "orders.updated",
+				Payload: "order_update_payload",
+			},
+		})
 		require.NoError(t, err, "Failed to publish order update message")
 
-		_, err = b.Publish(ctx, "events.user_created", []byte("event_payload"))
+		_, err = b.Publish(ctx, &bus.Outbound{
+			Message: bus.Message{
+				Subject: "events.user_created",
+				Payload: "event_payload",
+			},
+		})
 		require.NoError(t, err, "Failed to publish event message")
 
 		// Verify jobs were created
@@ -1957,7 +2338,12 @@ func TestSubscriptionDrain(t *testing.T) {
 
 		// Publish multiple messages
 		for i := 0; i < 5; i++ {
-			_, err = b.Publish(ctx, "test.partial", []byte(fmt.Sprintf("payload_%d", i)))
+			_, err = b.Publish(ctx, &bus.Outbound{
+				Message: bus.Message{
+					Subject: "test.partial",
+					Payload: fmt.Sprintf("payload_%d", i),
+				},
+			})
 			require.NoError(t, err, "Failed to publish message %d", i)
 		}
 
@@ -2026,7 +2412,12 @@ func TestSubscriptionDrain(t *testing.T) {
 
 		// Publish several messages to create jobs
 		for i := 0; i < 5; i++ {
-			_, err = b.Publish(ctx, "test.status", []byte(fmt.Sprintf("payload_%d", i)))
+			_, err = b.Publish(ctx, &bus.Outbound{
+				Message: bus.Message{
+					Subject: "test.status",
+					Payload: fmt.Sprintf("payload_%d", i),
+				},
+			})
 			require.NoError(t, err, "Failed to publish message %d", i)
 		}
 
@@ -2101,7 +2492,12 @@ func TestAutoDrainOnUnsubscribe(t *testing.T) {
 
 		// Publish some messages to create jobs
 		for i := 0; i < 3; i++ {
-			_, err = b.Publish(ctx, "test.autodrain", []byte(fmt.Sprintf("payload_%d", i)))
+			_, err = b.Publish(ctx, &bus.Outbound{
+				Message: bus.Message{
+					Subject: "test.autodrain",
+					Payload: fmt.Sprintf("payload_%d", i),
+				},
+			})
 			require.NoError(t, err, "Failed to publish message %d", i)
 		}
 
@@ -2129,7 +2525,12 @@ func TestAutoDrainOnUnsubscribe(t *testing.T) {
 
 		// Publish some messages to create jobs
 		for i := 0; i < 3; i++ {
-			_, err = b.Publish(ctx, "test.no_autodrain", []byte(fmt.Sprintf("payload_%d", i)))
+			_, err = b.Publish(ctx, &bus.Outbound{
+				Message: bus.Message{
+					Subject: "test.no_autodrain",
+					Payload: fmt.Sprintf("payload_%d", i),
+				},
+			})
 			require.NoError(t, err, "Failed to publish message %d", i)
 		}
 

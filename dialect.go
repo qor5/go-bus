@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/qor5/go-bus/bussql"
 	"github.com/qor5/go-que"
 )
 
@@ -37,6 +38,9 @@ type Dialect interface {
 	// Upsert creates or updates a subscription with the provided options.
 	Upsert(ctx context.Context, queue, pattern string, opts *SubscribeOptions) (Subscription, error)
 
-	// BeginTx starts a transaction.
-	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	// ExecTx executes fn within a database transaction.
+	// If the context already contains a transaction (via bussql.NewContext), that transaction
+	// is reused (with a savepoint if enabled). Otherwise, a new transaction is started.
+	// The transaction is automatically committed if fn returns nil, or rolled back on error.
+	ExecTx(ctx context.Context, fn func(ctx context.Context, tx *sql.Tx) error, opts ...bussql.TransactionOption) error
 }

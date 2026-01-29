@@ -10,6 +10,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/qor5/go-bus"
+	"github.com/qor5/go-bus/bussql"
 	"github.com/qor5/go-que"
 	"github.com/qor5/go-que/pg"
 )
@@ -57,9 +58,15 @@ func (d *Dialect) GoQue() que.Queue {
 	return d.goq
 }
 
-// BeginTx starts a transaction.
-func (d *Dialect) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	return d.db.BeginTx(ctx, opts)
+// ExecTx executes fn within a database transaction.
+// If the context already contains a transaction (via bussql.NewContext), that transaction
+// is reused (with a savepoint if enabled). Otherwise, a new transaction is started.
+// The transaction is stored in context via bussql.NewContext for nested calls.
+func (d *Dialect) ExecTx(ctx context.Context, fn func(ctx context.Context, tx *sql.Tx) error, opts ...bussql.TransactionOption) error {
+	exec := bussql.FromContext(ctx, d.db)
+	return bussql.Transaction(ctx, exec, func(ctx context.Context, tx *sql.Tx) error {
+		return fn(bussql.NewContext(ctx, tx), tx)
+	}, opts...)
 }
 
 var MaxMigrationAttempts = 10
@@ -328,7 +335,7 @@ func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) 
 }
 
 // Upsert creates or updates a subscription.
-func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.SubscribeOptions) (_ bus.Subscription, xerr error) {
+func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.SubscribeOptions) (bus.Subscription, error) {
 	if strings.TrimSpace(queue) == "" {
 		return nil, errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -372,73 +379,68 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 		}
 	}
 
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to begin transaction")
-	}
-	defer func() {
-		if xerr != nil {
-			_ = tx.Rollback()
+	var resultSub bus.Subscription
+	err = d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Soft delete any existing subscription (including expired ones)
+		// This preserves history and eliminates all conflict scenarios
+		_, err := tx.ExecContext(ctx,
+			`UPDATE gobus_subscriptions 
+             SET deleted_at = NOW(), updated_at = NOW() 
+             WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL`,
+			queue, pattern)
+		if err != nil {
+			return errors.Wrap(err, "failed to soft delete existing subscription")
 		}
-	}()
 
-	// Soft delete any existing subscription (including expired ones)
-	// This preserves history and eliminates all conflict scenarios
-	_, err = tx.ExecContext(ctx,
-		`UPDATE gobus_subscriptions 
-         SET deleted_at = NOW(), updated_at = NOW() 
-         WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL`,
-		queue, pattern)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to soft delete existing subscription")
-	}
+		// Create a completely new subscription record
+		rows, err := tx.QueryContext(
+			ctx,
+			`INSERT INTO gobus_subscriptions 
+             (queue, pattern, regex_pattern, options, created_at, updated_at,
+              expires_at,
+              token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
+              token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15) 
+             VALUES ($1, $2, $3, $4, NOW(), NOW(), 
+                     CASE WHEN $5 <= 0 THEN NULL 
+                          ELSE NOW() + ($5 * INTERVAL '1 microsecond') 
+                     END,
+                     $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            RETURNING id, queue, pattern, regex_pattern, options, created_at, updated_at, deleted_at,
+                      expires_at,
+                      token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
+                      token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15`,
+			queue, pattern, regexPattern, optionsData, ttlMicroseconds,
+			tokens[0], tokens[1], tokens[2], tokens[3],
+			tokens[4], tokens[5], tokens[6], tokens[7],
+			tokens[8], tokens[9], tokens[10], tokens[11],
+			tokens[12], tokens[13], tokens[14], tokens[15],
+		)
+		if err != nil {
+			return errors.Wrap(err, "failed to insert or update subscription")
+		}
+		defer rows.Close()
 
-	// Create a completely new subscription record
-	rows, err := tx.QueryContext(
-		ctx,
-		`INSERT INTO gobus_subscriptions 
-         (queue, pattern, regex_pattern, options, created_at, updated_at,
-          expires_at,
-          token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
-          token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15) 
-         VALUES ($1, $2, $3, $4, NOW(), NOW(), 
-                 CASE WHEN $5 <= 0 THEN NULL 
-                      ELSE NOW() + ($5 * INTERVAL '1 microsecond') 
-                 END,
-                 $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-		RETURNING id, queue, pattern, regex_pattern, options, created_at, updated_at, deleted_at,
-		          expires_at,
-		          token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
-		          token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15`,
-		queue, pattern, regexPattern, optionsData, ttlMicroseconds,
-		tokens[0], tokens[1], tokens[2], tokens[3],
-		tokens[4], tokens[5], tokens[6], tokens[7],
-		tokens[8], tokens[9], tokens[10], tokens[11],
-		tokens[12], tokens[13], tokens[14], tokens[15],
-	)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to insert or update subscription")
-	}
-	defer rows.Close()
+		subs, err := d.scanSubscriptions(rows)
+		if err != nil {
+			return err
+		}
 
-	subs, err := d.scanSubscriptions(rows)
+		if err := d.updateMetadata(ctx, tx); err != nil {
+			return err
+		}
+
+		if len(subs) == 0 {
+			return bus.ErrSubscriptionNotFound
+		}
+
+		resultSub = subs[0]
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	if err := d.updateMetadata(ctx, tx); err != nil {
-		return nil, err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return nil, errors.Wrap(err, "failed to commit transaction")
-	}
-
-	if len(subs) == 0 {
-		return nil, bus.ErrSubscriptionNotFound
-	}
-
-	return subs[0], nil
+	return resultSub, nil
 }
 
 // updateMetadata updates the version and total_subscriptions count in gobus_metadata table
@@ -491,7 +493,7 @@ func (d *Dialect) drainInTx(ctx context.Context, tx *sql.Tx, queue, pattern stri
 // delete performs soft delete of a subscription for the given queue and pattern.
 // If autoDrain is enabled in the subscription options, it will automatically
 // drain all pending jobs for the subscription in the same transaction.
-func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error) {
+func (d *Dialect) delete(ctx context.Context, queue, pattern string) error {
 	if strings.TrimSpace(queue) == "" {
 		return errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -500,61 +502,42 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) (xerr error
 		return err
 	}
 
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Wrap(err, "failed to begin transaction")
-	}
-	defer func() {
-		if xerr != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	var optionsData []byte
-	err = tx.QueryRowContext(
-		ctx,
-		`UPDATE gobus_subscriptions 
-         SET deleted_at = NOW(), updated_at = NOW() 
-         WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
-         RETURNING options`,
-		queue, pattern,
-	).Scan(&optionsData)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			// For idempotent behavior, deletion of non-existent subscription should succeed
-			// No need to update metadata since no actual changes occurred
-			if err = tx.Commit(); err != nil {
-				return errors.Wrap(err, "failed to commit transaction")
-			}
-			return nil
-		}
-		return errors.Wrap(err, "failed to soft delete subscription")
-	}
-
-	// Parse the options to check autoDrain setting
-	var options bus.SubscribeOptions
-	if err := json.Unmarshal(optionsData, &options); err != nil {
-		// If we can't parse options, continue without auto-drain
-		options.AutoDrain = false
-	}
-
-	// If autoDrain is enabled, clean up jobs in the same transaction
-	if options.AutoDrain {
-		_, err = d.drainInTx(ctx, tx, queue, pattern)
+	return d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var optionsData []byte
+		err := tx.QueryRowContext(
+			ctx,
+			`UPDATE gobus_subscriptions 
+             SET deleted_at = NOW(), updated_at = NOW() 
+             WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
+             RETURNING options`,
+			queue, pattern,
+		).Scan(&optionsData)
 		if err != nil {
-			return errors.Wrap(err, "failed to auto-drain subscription jobs")
+			if err == sql.ErrNoRows {
+				// For idempotent behavior, deletion of non-existent subscription should succeed
+				// No need to update metadata since no actual changes occurred
+				return nil
+			}
+			return errors.Wrap(err, "failed to soft delete subscription")
 		}
-	}
 
-	if err := d.updateMetadata(ctx, tx); err != nil {
-		return err
-	}
+		// Parse the options to check autoDrain setting
+		var options bus.SubscribeOptions
+		if err := json.Unmarshal(optionsData, &options); err != nil {
+			// If we can't parse options, continue without auto-drain
+			options.AutoDrain = false
+		}
 
-	if err = tx.Commit(); err != nil {
-		return errors.Wrap(err, "failed to commit transaction")
-	}
+		// If autoDrain is enabled, clean up jobs in the same transaction
+		if options.AutoDrain {
+			_, err = d.drainInTx(ctx, tx, queue, pattern)
+			if err != nil {
+				return errors.Wrap(err, "failed to auto-drain subscription jobs")
+			}
+		}
 
-	return nil
+		return d.updateMetadata(ctx, tx)
+	})
 }
 
 // updateHeartbeat updates the expiration timestamp for a subscription.
@@ -596,7 +579,7 @@ func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) er
 // This method uses PostgreSQL advisory locks to safely clean up jobs without affecting running jobs.
 // It filters jobs based on the subscription's pattern using the HeaderSubscriptionPattern header.
 // Returns the number of jobs that were deleted.
-func (d *Dialect) drain(ctx context.Context, queue, pattern string) (_ int, xerr error) {
+func (d *Dialect) drain(ctx context.Context, queue, pattern string) (int, error) {
 	if strings.TrimSpace(queue) == "" {
 		return 0, errors.Wrap(bus.ErrInvalidQueue, "queue name cannot be empty")
 	}
@@ -605,23 +588,14 @@ func (d *Dialect) drain(ctx context.Context, queue, pattern string) (_ int, xerr
 		return 0, err
 	}
 
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to begin transaction")
-	}
-	defer func() {
-		if xerr != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	deletedCount, err := d.drainInTx(ctx, tx, queue, pattern)
+	var deletedCount int
+	err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var err error
+		deletedCount, err = d.drainInTx(ctx, tx, queue, pattern)
+		return err
+	})
 	if err != nil {
 		return 0, err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return 0, errors.Wrap(err, "failed to commit transaction")
 	}
 
 	return deletedCount, nil

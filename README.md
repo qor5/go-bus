@@ -119,7 +119,7 @@ err = customSub.Unsubscribe(ctx)
 ### Publishing Messages
 
 ```go
-// Basic dispatch with a struct payload
+// Basic publish with a struct payload
 type Order struct {
     ID    string  `json:"id"`
     Total float64 `json:"total"`
@@ -257,11 +257,9 @@ Each instance creates a queue with a unique name, so each message is processed i
 go-bus supports three types of topic matching patterns, following the NATS messaging system style:
 
 1. **Exact Match**: Matches the exact topic string
-
    - Example: `orders.created` only matches `orders.created`
 
 2. **Single-Level Wildcard (`*`)**: Matches any string in a single level
-
    - Example: `products.*.category.*.info` matches `products.xyz.category.abc.info` and `products.123.category.456.info`, but not `products.category.info` or `products.xyz.category.abc.def.info`
 
 3. **Multi-Level Wildcard (`>`)**: Matches zero or more levels

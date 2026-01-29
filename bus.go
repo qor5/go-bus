@@ -170,30 +170,13 @@ func (b *BusImpl) Queue(name string) Queue {
 	return queue
 }
 
-// Publish sends a payload to all queues with subscriptions matching the subject.
-func (b *BusImpl) Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) (*Dispatch, error) {
-	publishOpts := &PublishOptions{}
-	for _, opt := range opts {
-		opt(publishOpts)
-	}
-
-	return b.Dispatch(ctx, &Outbound{
-		Message: Message{
-			Subject: subject,
-			Header:  publishOpts.Header,
-			Payload: payload,
-		},
-		UniqueID: publishOpts.UniqueID,
-	})
-}
-
 func descOfSubscription(sub Subscription) string {
 	return fmt.Sprintf("(queue: %s, pattern: %s, id: %s)", sub.Queue(), sub.Pattern(), sub.ID())
 }
 
-// Dispatch sends outbound messages to all queues with subscriptions matching the subject.
+// Publish sends outbound messages to all queues with subscriptions matching the subject.
 // All messages are processed in a single transaction.
-func (b *BusImpl) Dispatch(ctx context.Context, msgs ...*Outbound) (_ *Dispatch, xerr error) {
+func (b *BusImpl) Publish(ctx context.Context, msgs ...*Outbound) (_ *Dispatch, xerr error) {
 	if len(msgs) == 0 {
 		return &Dispatch{
 			Executions: []*SubscriptionExecution{},

@@ -119,46 +119,68 @@ err = customSub.Unsubscribe(ctx)
 ### Publishing Messages
 
 ```go
-// Basic publish
-_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
+// Basic publish with a struct payload
+type Order struct {
+    ID    string  `json:"id"`
+    Total float64 `json:"total"`
+}
 
-// Publishing with unique ID (for deduplication)
-_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
+_, err = bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "orders.created",
+        Payload: Order{ID: "12345", Total: 99.99},
+    },
+})
 
-// Publishing with headers
-_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
-    "Content-Type": []string{"application/json"},
-    "X-Request-ID": []string{"req-123456"},
-}))
+// Publish with unique ID (for deduplication)
+_, err = bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "orders.created",
+        Payload: Order{ID: "12345", Total: 99.99},
+    },
+    UniqueID: bus.UniqueID("order-12345"),
+})
 
-// Publishing with an Outbound object
+// Publish with headers
+_, err = bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "orders.created",
+        Header: bus.Header{
+            "Content-Type": []string{"application/json"},
+            "X-Request-ID": []string{"req-123456"},
+        },
+        Payload: Order{ID: "12345", Total: 99.99},
+    },
+})
+
+// Publish with an Outbound object
 outbound := &bus.Outbound{
     Message: bus.Message{
         Subject: "orders.created",
         Header:  bus.Header{"Content-Type": []string{"application/json"}},
-        Payload: []byte(`{"id": "12345", "total": 99.99}`),
+        Payload: Order{ID: "12345", Total: 99.99},
     },
     UniqueID: bus.UniqueID("order-12345"), // Optional unique ID for message deduplication
 }
-_, err = bus.Dispatch(ctx, outbound)
+_, err = bus.Publish(ctx, outbound)
 
-// Publishing multiple messages at once
+// Publish multiple messages at once
 outbound1 := &bus.Outbound{
     Message: bus.Message{
         Subject: "orders.created",
-        Payload: []byte(`{"id": "12345", "total": 99.99}`),
+        Payload: Order{ID: "12345", Total: 99.99},
     },
     UniqueID: bus.UniqueID("order-12345"),
 }
 outbound2 := &bus.Outbound{
     Message: bus.Message{
         Subject: "notifications.sent",
-        Payload: []byte(`{"user_id": "user123", "message": "Your order has been created"}`),
+        Payload: json.RawMessage(`{"user_id":"user123","message":"Your order has been created"}`),
     },
     UniqueID: bus.UniqueID("notification-user123-order-created"),
 }
-// Dispatch supports publishing multiple outbound messages in a single call
-_, err = bus.Dispatch(ctx, outbound1, outbound2)
+// Publish supports publishing multiple outbound messages in a single call
+_, err = bus.Publish(ctx, outbound1, outbound2)
 ```
 
 ### Finding Matching Subscriptions
@@ -235,11 +257,9 @@ Each instance creates a queue with a unique name, so each message is processed i
 go-bus supports three types of topic matching patterns, following the NATS messaging system style:
 
 1. **Exact Match**: Matches the exact topic string
-
    - Example: `orders.created` only matches `orders.created`
 
 2. **Single-Level Wildcard (`*`)**: Matches any string in a single level
-
    - Example: `products.*.category.*.info` matches `products.xyz.category.abc.info` and `products.123.category.456.info`, but not `products.category.info` or `products.xyz.category.abc.def.info`
 
 3. **Multi-Level Wildcard (`>`)**: Matches zero or more levels

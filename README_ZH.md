@@ -116,46 +116,68 @@ err = customSub.Unsubscribe(ctx)
 ### 发布消息
 
 ```go
-// 基本发布
-_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`))
+// 使用结构体作为载荷
+type Order struct {
+    ID    string  `json:"id"`
+    Total float64 `json:"total"`
+}
 
-// 带唯一ID的发布（用于消息去重）
-_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithUniqueID("order-12345"))
+_, err = bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "orders.created",
+        Payload: Order{ID: "12345", Total: 99.99},
+    },
+})
 
-// 带头部信息的发布
-_, err = bus.Publish(ctx, "orders.created", []byte(`{"id": "12345", "total": 99.99}`), bus.WithHeader(bus.Header{
-    "Content-Type": []string{"application/json"},
-    "X-Request-ID": []string{"req-123456"},
-}))
+// 带唯一ID（用于消息去重）
+_, err = bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "orders.created",
+        Payload: Order{ID: "12345", Total: 99.99},
+    },
+    UniqueID: bus.UniqueID("order-12345"),
+})
 
-// 使用 Outbound 对象发布
+// 带头部信息
+_, err = bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "orders.created",
+        Header: bus.Header{
+            "Content-Type": []string{"application/json"},
+            "X-Request-ID": []string{"req-123456"},
+        },
+        Payload: Order{ID: "12345", Total: 99.99},
+    },
+})
+
+// 使用 Outbound 对象发送
 outbound := &bus.Outbound{
     Message: bus.Message{
         Subject: "orders.created",
         Header:  bus.Header{"Content-Type": []string{"application/json"}},
-        Payload: []byte(`{"id": "12345", "total": 99.99}`),
+        Payload: Order{ID: "12345", Total: 99.99},
     },
-    UniqueID: bus.UniqueID("order-12345"), // 可选的唯一ID，用于消息去重
+    UniqueID: bus.UniqueID("order-12345"), // 可选唯一ID
 }
-_, err = bus.Dispatch(ctx, outbound)
+_, err = bus.Publish(ctx, outbound)
 
-// 一次性发布多条消息
+// 一次性发送多条消息
 outbound1 := &bus.Outbound{
     Message: bus.Message{
         Subject: "orders.created",
-        Payload: []byte(`{"id": "12345", "total": 99.99}`),
+        Payload: Order{ID: "12345", Total: 99.99},
     },
     UniqueID: bus.UniqueID("order-12345"),
 }
 outbound2 := &bus.Outbound{
     Message: bus.Message{
         Subject: "notifications.sent",
-        Payload: []byte(`{"user_id": "user123", "message": "您的订单已创建"}`),
+        Payload: json.RawMessage(`{"user_id":"user123","message":"您的订单已创建"}`),
     },
     UniqueID: bus.UniqueID("notification-user123-order-created"),
 }
-// Dispatch 方法支持在一次调用中发布多个 outbound 消息
-_, err = bus.Dispatch(ctx, outbound1, outbound2)
+// Publish 支持在一次调用中发送多个 outbound
+_, err = bus.Publish(ctx, outbound1, outbound2)
 ```
 
 ### 查找匹配订阅

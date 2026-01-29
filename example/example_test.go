@@ -151,11 +151,14 @@ func startCIAM(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitGroup
 	t.Log("CIAM other services are ready")
 
 	// User Creation
-	userBytes, err := json.Marshal(newUser)
-	require.NoError(t, err, "Failed to marshal user data")
-
 	t.Log("CIAM creating new user in database")
-	_, err = b.Publish(ctx, SubjectIdentityCreated, userBytes, bus.WithUniqueID(newUser.ID))
+	_, err = b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: SubjectIdentityCreated,
+			Payload: newUser,
+		},
+		UniqueID: bus.UniqueID(newUser.ID),
+	})
 	require.NoError(t, err, "Failed to publish user creation event")
 
 	// User Information Update
@@ -164,11 +167,14 @@ func startCIAM(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitGroup
 		To:   updatedUser,
 	}
 
-	updateBytes, err := json.Marshal(update)
-	require.NoError(t, err, "Failed to marshal user update data")
-
 	t.Log("CIAM updating user information in database")
-	_, err = b.Publish(ctx, SubjectIdentityUpdated, updateBytes, bus.WithUniqueID(updatedUser.ID))
+	_, err = b.Publish(ctx, &bus.Outbound{
+		Message: bus.Message{
+			Subject: SubjectIdentityUpdated,
+			Payload: update,
+		},
+		UniqueID: bus.UniqueID(updatedUser.ID),
+	})
 	require.NoError(t, err, "Failed to publish user update event")
 
 	<-ctx.Done()

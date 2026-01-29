@@ -43,7 +43,16 @@ consumer, _ := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbou
 defer consumer.Stop(ctx)
 
 // Publish
-bus.Publish(ctx, "events.user.created", []byte(`{"id":"123"}`))
+type UserEvent struct {
+    ID string `json:"id"`
+}
+
+bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "events.user.created",
+        Payload: UserEvent{ID: "123"},
+    },
+})
 ```
 
 ### 2. Multiple Queues (Fan-out)
@@ -56,7 +65,12 @@ notificationsQueue := bus.Queue("notifications-service")
 notificationsQueue.Subscribe(ctx, "user.>")
 
 // Both queues receive this message
-bus.Publish(ctx, "user.registered", []byte(`{"email":"user@example.com"}`))
+bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "user.registered",
+        Payload: json.RawMessage(`{"email":"user@example.com"}`),
+    },
+})
 ```
 
 ### 3. Selective Routing with Wildcards
@@ -70,8 +84,8 @@ analyticsQueue := bus.Queue("analytics-service")
 analyticsQueue.Subscribe(ctx, "order.>")
 analyticsQueue.Subscribe(ctx, "payment.>")
 
-bus.Publish(ctx, "payment.completed", data)  // → payment-service, analytics-service
-bus.Publish(ctx, "order.shipped", data)      // → analytics-service only
+bus.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "payment.completed", Payload: data}}) // → payment-service, analytics-service
+bus.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "order.shipped", Payload: data}})     // → analytics-service only
 ```
 
 ### 4. Custom Retry Policy (Critical Jobs)
@@ -98,7 +112,12 @@ delayedPlan := &bus.PlanConfig{
 }
 
 queue.Subscribe(ctx, "reminder.>", bus.WithPlanConfig(delayedPlan))
-bus.Publish(ctx, "reminder.send", []byte(`{"user":"123"}`))
+bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "reminder.send",
+        Payload: map[string]string{"user": "123"},
+    },
+})
 // Message won't be processed for 5 minutes
 ```
 
@@ -129,33 +148,33 @@ consumer, _ := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.In
 defer consumer.Stop(ctx)
 ```
 
-### 7. Batch Publishing (Transactional)
+### 7. Batch Publish (Transactional)
 ```go
 // All-or-nothing: all messages succeed or all fail
 msgs := []*bus.Outbound{
     {
         Message: bus.Message{
             Subject: "order.created",
-            Payload: []byte(`{"order_id":"123"}`),
+            Payload: map[string]string{"order_id": "123"},
         },
         UniqueID: bus.UniqueID("order-123"),
     },
     {
         Message: bus.Message{
             Subject: "inventory.reserved",
-            Payload: []byte(`{"items":[...]}`),
+            Payload: json.RawMessage(`{"items":["..."]}`),
         },
         UniqueID: bus.UniqueID("inventory-123"),
     },
     {
         Message: bus.Message{
             Subject: "notification.queued",
-            Payload: []byte(`{"user":"456"}`),
+            Payload: map[string]string{"user": "456"},
         },
     },
 }
 
-dispatch, _ := bus.Dispatch(ctx, msgs...)
+dispatch, _ := bus.Publish(ctx, msgs...)
 log.Printf("Published %d messages", dispatch.ExecutedCount())
 ```
 
@@ -163,9 +182,13 @@ log.Printf("Published %d messages", dispatch.ExecutedCount())
 ```go
 // Prevent duplicate processing with UniqueID
 for i := 0; i < 3; i++ {
-    bus.Publish(ctx, "payment.process", 
-        []byte(`{"payment_id":"pay-123"}`),
-        bus.WithUniqueID("pay-123"))
+    bus.Publish(ctx, &bus.Outbound{
+        Message: bus.Message{
+            Subject: "payment.process",
+            Payload: map[string]string{"payment_id": "pay-123"},
+        },
+        UniqueID: bus.UniqueID("pay-123"),
+    })
 }
 // Only one job created due to deduplication
 ```
@@ -173,12 +196,17 @@ for i := 0; i < 3; i++ {
 ### 9. Message Headers (Metadata)
 ```go
 // Publish with headers
-bus.Publish(ctx, "order.created", payload,
-    bus.WithHeader(bus.Header{
-        "Content-Type":  []string{"application/json"},
-        "X-Request-ID":  []string{"req-123"},
-        "X-User-ID":     []string{"user-456"},
-    }))
+bus.Publish(ctx, &bus.Outbound{
+    Message: bus.Message{
+        Subject: "order.created",
+        Header: bus.Header{
+            "Content-Type":  []string{"application/json"},
+            "X-Request-ID":  []string{"req-123"},
+            "X-User-ID":     []string{"user-456"},
+        },
+        Payload: map[string]string{"order_id": "123"},
+    },
+})
 
 // Read headers in consumer
 consumer, _ := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
@@ -236,7 +264,7 @@ bus, _ := pgbus.New(db,
     bus.WithDialectDecorator(bus.RistrettoDecorator(cache)))
 
 // Subscription lookups are now cached
-bus.Publish(ctx, "high.frequency.event", data)
+bus.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "high.frequency.event", Payload: data}})
 ```
 
 ### 13. Monitoring & Debugging
@@ -255,8 +283,8 @@ for _, sub := range allSubs {
         sub.Pattern(), sub.ID())
 }
 
-// Check dispatch results
-dispatch, _ := bus.Publish(ctx, "test.event", data)
+// Check publish results
+dispatch, _ := bus.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "test.event", Payload: data}})
 log.Printf("Matched: %d, Executed: %d, Skipped: %d",
     dispatch.MatchedCount(),
     dispatch.ExecutedCount(),
@@ -301,7 +329,7 @@ saga := []*bus.Outbound{
     {Message: bus.Message{Subject: "saga.charge-payment", Payload: paymentData}},
     {Message: bus.Message{Subject: "saga.send-confirmation", Payload: notifData}},
 }
-bus.Dispatch(ctx, saga...)
+bus.Publish(ctx, saga...)
 
 // Each service subscribes to its step
 inventoryQueue.Subscribe(ctx, "saga.reserve-inventory")
@@ -310,7 +338,7 @@ notificationQueue.Subscribe(ctx, "saga.send-confirmation")
 
 // On failure, publish compensation events
 if err := reserveInventory(); err != nil {
-    bus.Publish(ctx, "saga.compensate.release-inventory", data)
+    bus.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "saga.compensate.release-inventory", Payload: data}})
     return msg.Destroy(ctx)
 }
 ```
@@ -327,10 +355,6 @@ if err := reserveInventory(); err != nil {
 - `bus.WithPlanConfig(config)` - Retry policy, delays, deduplication
 - `bus.WithTTL(duration)` - Auto-expire subscription
 - `bus.WithAutoDrain(true)` - Auto-cleanup on unsubscribe
-
-### Publish Options
-- `bus.WithHeader(header)` - Add metadata
-- `bus.WithUniqueID(id)` - Deduplication key
 
 ## Common Pitfalls
 

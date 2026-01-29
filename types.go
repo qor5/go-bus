@@ -10,6 +10,7 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -34,7 +35,19 @@ type Message struct {
 	Header Header `json:"header"`
 
 	// Payload is the actual content of the message.
-	Payload []byte `json:"payload"`
+	//
+	// When publishing (Outbound), the following payload types are supported:
+	//   - Any Go value that is JSON-marshalable (e.g., structs, maps, slices, scalars)
+	//   - json.RawMessage (used as-is, without additional marshaling)
+	//   - []byte (encoded by encoding/json as a base64 JSON string; use json.RawMessage for raw JSON)
+	//
+	// When receiving (Inbound), InboundFromArgs assigns the raw JSON payload as a
+	// json.RawMessage to Inbound.Payload (i.e., msg.Payload on *Inbound). For
+	// convenience and backwards compatibility, this same raw payload is also
+	// populated into Message.Payload. Inbound handlers should primarily use
+	// Inbound.Payload/msg.Payload (on the Inbound value) as the source of raw JSON
+	// and unmarshal it into concrete types as needed.
+	Payload any `json:"payload"`
 }
 
 type Outbound struct {
@@ -49,6 +62,19 @@ type Outbound struct {
 type Inbound struct {
 	// Message is the message content.
 	Message
+
+	// Payload is the raw JSON payload of the message.
+	//
+	// When publishing (Outbound), the following payload types are supported:
+	//   - Any Go value that is JSON-marshalable (e.g., structs, maps, slices, scalars)
+	//   - json.RawMessage (used as-is, without additional marshaling)
+	//   - []byte (encoded by encoding/json as a base64 JSON string; use json.RawMessage for raw JSON)
+	//
+	// When receiving (Inbound), InboundFromArgs currently assigns a json.RawMessage
+	// containing the raw JSON payload to this field. Handlers can therefore rely
+	// on msg.Payload being a json.RawMessage for inbound messages, and may type-assert
+	// accordingly or unmarshal it into a concrete type.
+	Payload json.RawMessage `json:"payload"`
 
 	// Job is the job that received the message.
 	que.Job `json:"-"`
@@ -83,12 +109,9 @@ type Bus interface {
 	// Queue returns a queue with the specified name.
 	Queue(name string) Queue
 
-	// Publish sends a payload to all queues with subscriptions matching the subject.
-	Publish(ctx context.Context, subject string, payload []byte, opts ...PublishOption) (*Dispatch, error)
-
-	// Dispatch sends outbound messages to all queues with subscriptions matching the subject.
+	// Publish sends outbound messages to all queues with subscriptions matching the subject.
 	// All messages are processed in a single transaction.
-	Dispatch(ctx context.Context, msgs ...*Outbound) (*Dispatch, error)
+	Publish(ctx context.Context, msgs ...*Outbound) (*Dispatch, error)
 
 	// BySubject returns all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)

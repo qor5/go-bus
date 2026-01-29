@@ -35,6 +35,16 @@ type Message struct {
 	Header Header `json:"header"`
 
 	// Payload is the actual content of the message.
+	//
+	// When publishing (Outbound), the following payload types are supported:
+	//   - Any Go value that is JSON-marshalable (e.g., structs, maps, slices, scalars)
+	//   - json.RawMessage (used as-is, without additional marshaling)
+	//   - []byte (treated as raw JSON bytes, equivalent to json.RawMessage)
+	//
+	// When receiving (Inbound), InboundFromArgs currently assigns a json.RawMessage
+	// containing the raw JSON payload to this field. Handlers can therefore rely
+	// on msg.Payload being a json.RawMessage for inbound messages, and may type-assert
+	// accordingly or unmarshal it into a concrete type.
 	Payload any `json:"payload"`
 }
 

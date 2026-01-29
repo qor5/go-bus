@@ -10,6 +10,7 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -49,6 +50,9 @@ type Outbound struct {
 type Inbound struct {
 	// Message is the message content.
 	Message
+
+	// Payload is the raw JSON payload of the message.
+	Payload json.RawMessage `json:"payload"`
 
 	// Job is the job that received the message.
 	que.Job `json:"-"`

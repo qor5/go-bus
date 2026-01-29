@@ -504,21 +504,18 @@ func TestPublish(t *testing.T) {
 			msg, err := bus.InboundFromArgs(job.Args)
 			require.NoError(t, err, "Failed to parse message from args")
 
-			raw, ok := msg.Payload.(json.RawMessage)
-			require.True(t, ok, "Payload should be json.RawMessage")
-
 			switch msg.Subject {
 			case "orders.new":
 				var s string
-				require.NoError(t, json.Unmarshal(raw, &s))
+				require.NoError(t, json.Unmarshal(msg.Payload, &s))
 				assert.Equal(t, "hello", s, "String payload mismatch")
 			case "orders.item999.processed":
 				var n int
-				require.NoError(t, json.Unmarshal(raw, &n))
+				require.NoError(t, json.Unmarshal(msg.Payload, &n))
 				assert.Equal(t, 42, n, "Int payload mismatch")
 			case "orders.binary":
 				var b []byte
-				require.NoError(t, json.Unmarshal(raw, &b))
+				require.NoError(t, json.Unmarshal(msg.Payload, &b))
 				assert.Equal(t, []byte("bin"), b, "[]byte payload mismatch")
 			default:
 				t.Fatalf("Unexpected subject %s", msg.Subject)
@@ -575,14 +572,14 @@ func TestPublish(t *testing.T) {
 		for _, job := range queue1Jobs {
 			msg, err := bus.InboundFromArgs(job.Args)
 			require.NoError(t, err, "Failed to parse message from args")
-			messageMap[msg.Subject] = msg.Payload.(json.RawMessage)
+			messageMap[msg.Subject] = msg.Payload
 			headerMap[msg.Subject] = msg.Header.Get("batch")
 		}
 
 		for _, job := range queue2Jobs {
 			msg, err := bus.InboundFromArgs(job.Args)
 			require.NoError(t, err, "Failed to parse message from args")
-			messageMap[msg.Subject] = msg.Payload.(json.RawMessage)
+			messageMap[msg.Subject] = msg.Payload
 			headerMap[msg.Subject] = msg.Header.Get("batch")
 		}
 

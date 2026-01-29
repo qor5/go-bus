@@ -42,21 +42,16 @@ func (m *Message) ToRaw(sub Subscription) (json.RawMessage, error) {
 // InboundFromArgs creates an Inbound message from raw arguments.
 // This is primarily used for testing and debugging purposes.
 func InboundFromArgs(args []byte) (*Inbound, error) {
-	var raw struct {
-		Message
-		Payload json.RawMessage `json:"payload"`
-	}
-	count, err := que.ParseArgs(args, &raw)
+	inbound := &Inbound{}
+	count, err := que.ParseArgs(args, inbound)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse message")
 	}
 	if count != 1 {
 		return nil, errors.Errorf("invalid args count: %d", count)
 	}
-	raw.Message.Payload = raw.Payload
-	return &Inbound{
-		Message: raw.Message,
-	}, nil
+	inbound.Message.Payload = inbound.Payload
+	return inbound, nil
 }
 
 // InboundFromJob creates an Inbound message from a que.Job.

@@ -193,7 +193,7 @@ func startBusiness(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitG
 
 	consumer, err := businessQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
 		var user User
-		if err := json.Unmarshal(msg.Payload.(json.RawMessage), &user); err != nil {
+		if err := json.Unmarshal(msg.Payload, &user); err != nil {
 			return err
 		}
 
@@ -235,7 +235,7 @@ func startMarketing(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.Wait
 
 	consumer, err := marketingQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
 		var update UserUpdate
-		if err := json.Unmarshal(msg.Payload.(json.RawMessage), &update); err != nil {
+		if err := json.Unmarshal(msg.Payload, &update); err != nil {
 			return err
 		}
 

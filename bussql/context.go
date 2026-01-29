@@ -29,7 +29,7 @@ type ctxKeyExecutor struct{}
 // Example:
 //
 //	func doSomething(ctx context.Context, db *sql.DB) error {
-//	    exec := bustx.FromContext(ctx, db)
+//	    exec := bussql.FromContext(ctx, db)
 //	    _, err := exec.ExecContext(ctx, "INSERT INTO ...")
 //	    return err
 //	}
@@ -46,8 +46,8 @@ func FromContext(ctx context.Context, fallback Executor) Executor {
 //
 // Example:
 //
-//	bustx.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-//	    ctx = bustx.NewContext(ctx, tx)
+//	bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+//	    ctx = bussql.NewContext(ctx, tx)
 //	    return doSomething(ctx, db) // doSomething will use tx via FromContext
 //	})
 func NewContext(ctx context.Context, executor Executor) context.Context {

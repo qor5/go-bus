@@ -39,6 +39,7 @@ bus, err := pgbus.New(db)
 if err != nil {
     log.Fatalf("创建总线失败: %v", err)
 }
+defer bus.Close() // 始终关闭总线以释放资源
 ```
 
 ### 消费消息
@@ -254,11 +255,9 @@ defer func() {
 go-bus 支持三种主题匹配模式，遵循 NATS 消息系统的风格：
 
 1. **精确匹配**：完全匹配主题字符串
-
    - 例如：`orders.created` 只匹配 `orders.created`
 
 2. **单级通配符 (`*`)**：匹配一个层级的任意字符串
-
    - 例如：`products.*.category.*.info` 匹配 `products.xyz.category.abc.info` 和 `products.123.category.456.info`，但不匹配 `products.category.info` 或 `products.xyz.category.abc.def.info`
 
 3. **多级通配符 (`>`)**：匹配零个或多个层级

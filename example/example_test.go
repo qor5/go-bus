@@ -127,6 +127,7 @@ func startCIAM(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitGroup
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create CIAM bus instance")
+	defer b.Close()
 
 	// Wait for both services to be ready, this is for testing purpose
 	t.Log("CIAM waiting for other services to be ready")
@@ -188,6 +189,7 @@ func startBusiness(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.WaitG
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Business bus instance")
+	defer b.Close()
 
 	businessQueue := b.Queue("business_service")
 
@@ -230,6 +232,7 @@ func startMarketing(ctx context.Context, t *testing.T, db *sql.DB, wg *sync.Wait
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Marketing bus instance")
+	defer b.Close()
 
 	marketingQueue := b.Queue("marketing_service")
 

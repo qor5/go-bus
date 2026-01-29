@@ -54,18 +54,18 @@ func prepareBenchmark(b *testing.B) (context.Context, bus.Bus, bus.Bus) {
 	cleanupAllTables()
 
 	// Bus without cache
-	noCacheBus, err := pgbus.New(db, bus.WithMigrate(false))
+	noCacheBus, err := pgbus.New(db, bus.WithMigrate(false), bus.WithoutCache())
 	if err != nil {
 		b.Fatalf("failed to create bus without cache: %v", err)
 	}
 
 	// Bus with cache - migration already done, no need to repeat
-	cache, err := bus.NewRistrettoCache(nil)
+	ristrettoCache, err := bus.NewRistrettoCache(nil)
 	require.NoError(b, err, "Failed to create cache instance")
 
 	cacheBus, err := pgbus.New(db,
 		bus.WithMigrate(false),
-		bus.WithDialectDecorator(bus.RistrettoDecorator(cache)),
+		bus.WithCache(bus.WrapRistrettoCache(ristrettoCache)),
 	)
 	if err != nil {
 		b.Fatalf("failed to create bus with cache: %v", err)
@@ -77,7 +77,9 @@ func prepareBenchmark(b *testing.B) (context.Context, bus.Bus, bus.Bus) {
 	// Clean up data after test
 	b.Cleanup(func() {
 		cleanupAllTables()
-		cache.Close()
+		_ = noCacheBus.Close()
+		_ = cacheBus.Close()
+		ristrettoCache.Close()
 	})
 
 	return ctx, noCacheBus, cacheBus
@@ -262,25 +264,27 @@ func BenchmarkDialectBySubject(b *testing.B) {
 			var testBus bus.Bus
 
 			if cacheScenario.useCache {
-				cache, err := bus.NewRistrettoCache(nil)
+				ristrettoCache, err := bus.NewRistrettoCache(nil)
 				if err != nil {
 					b.Fatalf("failed to create cache: %v", err)
 				}
-				defer cache.Close()
+				defer ristrettoCache.Close()
 
 				testBus, err = pgbus.New(db,
 					bus.WithMigrate(false),
-					bus.WithDialectDecorator(bus.RistrettoDecorator(cache)),
+					bus.WithCache(bus.WrapRistrettoCache(ristrettoCache)),
 				)
 				if err != nil {
 					b.Fatalf("failed to create cached bus: %v", err)
 				}
+				defer testBus.Close()
 			} else {
 				var err error
-				testBus, err = pgbus.New(db, bus.WithMigrate(false))
+				testBus, err = pgbus.New(db, bus.WithMigrate(false), bus.WithoutCache())
 				if err != nil {
 					b.Fatalf("failed to create bus: %v", err)
 				}
+				defer testBus.Close()
 			}
 
 			for _, scale := range scales {

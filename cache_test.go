@@ -11,26 +11,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRistrettoDecorator verifies the behavior and performance of the cache decorator
-func TestRistrettoDecorator(t *testing.T) {
+// TestCacheDecorator verifies the behavior and performance of the cache decorator
+func TestCacheDecorator(t *testing.T) {
 	cleanupAllTables()
 
 	// Create a bus without cache first - used for comparison
-	standardBus, err := pgbus.New(db, bus.WithMigrate(true))
+	standardBus, err := pgbus.New(db, bus.WithMigrate(true), bus.WithoutCache())
 	require.NoError(t, err, "Failed to create standard Bus instance")
+	defer standardBus.Close()
 
-	// Create a bus with cache decorator
-	cache, err := bus.NewRistrettoCache(nil)
+	// Create a bus with custom cache
+	ristrettoCache, err := bus.NewRistrettoCache(nil)
 	require.NoError(t, err, "Failed to create cache instance")
-	defer cache.Close()
+	defer ristrettoCache.Close()
 
 	cachedBus, err := pgbus.New(db,
 		bus.WithMigrate(false), // Migration done already
-		bus.WithDialectDecorator(
-			bus.RistrettoDecorator(cache),
-		),
+		bus.WithCache(bus.WrapRistrettoCache(ristrettoCache)),
 	)
 	require.NoError(t, err, "Failed to create cached Bus instance")
+	defer cachedBus.Close()
 
 	ctx := context.Background()
 
@@ -180,18 +180,18 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 	cleanupAllTables()
 
 	// Create cache-enabled bus
-	cache, err := bus.NewRistrettoCache(nil)
+	ristrettoCache, err := bus.NewRistrettoCache(nil)
 	require.NoError(t, err)
-	defer cache.Close()
+	defer ristrettoCache.Close()
+	cache := bus.WrapRistrettoCache(ristrettoCache)
 
 	t.Run("Cache Returns Valid TTL Subscriptions", func(t *testing.T) {
 		cachedBus, err := pgbus.New(db,
 			bus.WithMigrate(false), // Migration done already
-			bus.WithDialectDecorator(
-				bus.RistrettoDecorator(cache),
-			),
+			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
+		defer cachedBus.Close()
 
 		queue := cachedBus.Queue("test-cache-ttl-queue")
 
@@ -221,11 +221,10 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 		cleanupAllTables()
 		cachedBus, err := pgbus.New(db,
 			bus.WithMigrate(false),
-			bus.WithDialectDecorator(
-				bus.RistrettoDecorator(cache),
-			),
+			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
+		defer cachedBus.Close()
 
 		queue := cachedBus.Queue("test-cache-ttl-refresh-queue")
 
@@ -254,11 +253,10 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 		cleanupAllTables()
 		cachedBus, err := pgbus.New(db,
 			bus.WithMigrate(false),
-			bus.WithDialectDecorator(
-				bus.RistrettoDecorator(cache),
-			),
+			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
+		defer cachedBus.Close()
 
 		queue := cachedBus.Queue("test-cache-mixed-queue")
 
@@ -306,11 +304,10 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 		cleanupAllTables()
 		cachedBus, err := pgbus.New(db,
 			bus.WithMigrate(false),
-			bus.WithDialectDecorator(
-				bus.RistrettoDecorator(cache),
-			),
+			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
+		defer cachedBus.Close()
 
 		queue := cachedBus.Queue("test-cache-efficiency-queue")
 

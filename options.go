@@ -4,6 +4,7 @@
 package bus
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -155,7 +156,7 @@ func WithAutoDrain(autoDrain bool) SubscribeOption {
 
 // DialectDecorator is a function that decorates a Dialect with additional functionality.
 // It can return an error if the decoration process fails.
-type DialectDecorator func(Dialect) (Dialect, error)
+type DialectDecorator func(ctx context.Context, next Dialect) (Dialect, error)
 
 // BusOptions configures the Bus implementation.
 type BusOptions struct {
@@ -175,6 +176,16 @@ type BusOptions struct {
 	// functionality such as caching, metrics, or logging. If nil, the dialect is used as-is.
 	// This is applied after the dialect is created but before any operations are performed.
 	DialectDecorator DialectDecorator
+
+	// CacheEnabled controls whether caching is enabled. Default is true.
+	// When enabled and Cache is nil, a default Ristretto cache will be created.
+	// Set to false to disable caching entirely.
+	CacheEnabled bool
+
+	// Cache is a custom cache instance to use for subscription lookups.
+	// If nil and CacheEnabled is true, a default cache will be created.
+	// The caller is responsible for closing this cache if provided.
+	Cache Cache
 }
 
 type BusOption func(*BusOptions)
@@ -209,25 +220,25 @@ func WithDialectDecorator(decorators ...DialectDecorator) BusOption {
 		if opts.DialectDecorator != nil {
 			decorators = append(decorators, opts.DialectDecorator)
 		}
+		opts.DialectDecorator = composeDecorators(decorators...)
+	}
+}
 
-		if len(decorators) == 0 {
-			return
-		}
+// WithCache sets a custom cache for subscription lookups.
+// If cache is nil, caching will be disabled.
+// The caller is responsible for closing the provided cache.
+func WithCache(cache Cache) BusOption {
+	return func(opts *BusOptions) {
+		opts.CacheEnabled = cache != nil
+		opts.Cache = cache
+	}
+}
 
-		if len(decorators) == 1 {
-			opts.DialectDecorator = decorators[0]
-			return
-		}
-
-		opts.DialectDecorator = func(next Dialect) (Dialect, error) {
-			var err error
-			for i := len(decorators); i > 0; i-- {
-				next, err = decorators[i-1](next)
-				if err != nil {
-					return nil, err
-				}
-			}
-			return next, nil
-		}
+// WithoutCache disables the default cache.
+// This is equivalent to WithCache(nil).
+func WithoutCache() BusOption {
+	return func(opts *BusOptions) {
+		opts.CacheEnabled = false
+		opts.Cache = nil
 	}
 }

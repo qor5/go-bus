@@ -41,6 +41,7 @@ bus, err := pgbus.New(db)
 if err != nil {
     log.Fatalf("Failed to create bus: %v", err)
 }
+defer bus.Close() // Always close the bus to release resources
 ```
 
 ### Consuming Messages

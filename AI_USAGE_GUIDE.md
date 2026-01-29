@@ -9,18 +9,22 @@ PostgreSQL-based pub/sub message bus with NATS-style pattern matching, persisten
 ## Quick Reference
 
 ### Setup
+
 ```go
 db, _ := sql.Open("postgres", "postgres://...")
 bus, _ := pgbus.New(db)
+defer bus.Close()       // Always close to release resources
 queue := bus.Queue("my-queue")
 ```
 
 ### Pattern Matching
+
 - Exact: `"orders.created"` → matches `"orders.created"` only
 - Single wildcard: `"orders.*.status"` → matches `"orders.123.status"`
 - Multi wildcard: `"orders.>"` → matches `"orders.created"`, `"orders.items.added"`, etc.
 
 ### Core Types
+
 - `bus.Bus` - Message bus coordinator
 - `bus.Queue` - Named queue for subscriptions
 - `bus.Subscription` - Active subscription to a pattern
@@ -31,6 +35,7 @@ queue := bus.Queue("my-queue")
 ## Usage Examples
 
 ### 1. Basic Pub/Sub
+
 ```go
 // Subscribe
 queue.Subscribe(ctx, "events.>")
@@ -56,6 +61,7 @@ bus.Publish(ctx, &bus.Outbound{
 ```
 
 ### 2. Multiple Queues (Fan-out)
+
 ```go
 // Different services subscribe to same events
 ordersQueue := bus.Queue("orders-service")
@@ -74,6 +80,7 @@ bus.Publish(ctx, &bus.Outbound{
 ```
 
 ### 3. Selective Routing with Wildcards
+
 ```go
 // Payment service only cares about payment events
 paymentQueue := bus.Queue("payment-service")
@@ -89,6 +96,7 @@ bus.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "order.shipped", Pa
 ```
 
 ### 4. Custom Retry Policy (Critical Jobs)
+
 ```go
 criticalPlan := &bus.PlanConfig{
     RunAtDelta: 0, // Immediate
@@ -105,6 +113,7 @@ queue.Subscribe(ctx, "payment.>", bus.WithPlanConfig(criticalPlan))
 ```
 
 ### 5. Delayed Processing
+
 ```go
 delayedPlan := &bus.PlanConfig{
     RunAtDelta: 5 * time.Minute, // Wait 5 minutes before processing
@@ -122,6 +131,7 @@ bus.Publish(ctx, &bus.Outbound{
 ```
 
 ### 6. Broadcast to All Instances (Ephemeral Queues)
+
 ```go
 // Each pod/instance creates unique queue
 podQueue := bus.Queue(fmt.Sprintf("cache-invalidator-%s", uuid.New()))
@@ -149,6 +159,7 @@ defer consumer.Stop(ctx)
 ```
 
 ### 7. Batch Publish (Transactional)
+
 ```go
 // All-or-nothing: all messages succeed or all fail
 msgs := []*bus.Outbound{
@@ -179,6 +190,7 @@ log.Printf("Published %d messages", dispatch.ExecutedCount())
 ```
 
 ### 8. Message Deduplication
+
 ```go
 // Prevent duplicate processing with UniqueID
 for i := 0; i < 3; i++ {
@@ -194,6 +206,7 @@ for i := 0; i < 3; i++ {
 ```
 
 ### 9. Message Headers (Metadata)
+
 ```go
 // Publish with headers
 bus.Publish(ctx, &bus.Outbound{
@@ -218,6 +231,7 @@ consumer, _ := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbou
 ```
 
 ### 10. Error Handling & Retry
+
 ```go
 queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     var data OrderData
@@ -226,7 +240,7 @@ queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
         log.Printf("Invalid payload: %v", err)
         return msg.Destroy(ctx)
     }
-    
+
     if err := processOrder(data); err != nil {
         if isTemporaryError(err) {
             // Retry according to subscription's retry policy
@@ -236,13 +250,14 @@ queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
         log.Printf("Permanent error: %v", err)
         return msg.Destroy(ctx)
     }
-    
+
     // Success
     return msg.Done(ctx)
 })
 ```
 
 ### 11. Performance Tuning
+
 ```go
 workerConfig := &bus.WorkerConfig{
     MaxLockPerSecond:          10,   // Poll DB 10x/sec
@@ -251,35 +266,40 @@ workerConfig := &bus.WorkerConfig{
     MaxConcurrentPerformCount: 100,  // 100 concurrent handlers
 }
 
-consumer, _ := queue.StartConsumer(ctx, handler, 
+consumer, _ := queue.StartConsumer(ctx, handler,
     bus.WithWorkerConfig(workerConfig))
 ```
 
 ### 12. Caching for High-Throughput
+
 ```go
-// Create cache once, reuse across bus instances
-cache, _ := bus.NewRistrettoCache(nil) // Uses defaults
+// Default: Bus includes built-in cache automatically
+bus, _ := pgbus.New(db)
+defer bus.Close()
 
-bus, _ := pgbus.New(db, 
-    bus.WithDialectDecorator(bus.RistrettoDecorator(cache)))
+// Custom cache (if you need to share cache across instances)
+bus, _ := pgbus.New(db, bus.WithCache(cache))
+defer bus.Close()
 
-// Subscription lookups are now cached
-bus.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "high.frequency.event", Payload: data}})
+// Disable cache if needed
+bus, _ := pgbus.New(db, bus.WithoutCache())
+defer bus.Close()
 ```
 
 ### 13. Monitoring & Debugging
+
 ```go
 // Find which queues will receive a message
 subs, _ := bus.BySubject(ctx, "order.created")
 for _, sub := range subs {
-    log.Printf("Queue %s will receive (pattern: %s)", 
+    log.Printf("Queue %s will receive (pattern: %s)",
         sub.Queue(), sub.Pattern())
 }
 
 // List all subscriptions for a queue
 allSubs, _ := queue.Subscriptions(ctx)
 for _, sub := range allSubs {
-    log.Printf("Subscribed to: %s (ID: %s)", 
+    log.Printf("Subscribed to: %s (ID: %s)",
         sub.Pattern(), sub.ID())
 }
 
@@ -292,29 +312,32 @@ log.Printf("Matched: %d, Executed: %d, Skipped: %d",
 ```
 
 ### 14. Graceful Shutdown
+
 ```go
 func main() {
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
-    
+
     // Setup
     bus, _ := pgbus.New(db)
+    defer bus.Close() // Close bus to release cache resources
+
     queue := bus.Queue("my-service")
     queue.Subscribe(ctx, "events.>")
-    
+
     consumer, _ := queue.StartConsumer(ctx, handler)
-    
+
     // Handle shutdown
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-    
+
     <-sigChan
     log.Println("Shutting down...")
-    
+
     // Stop consumer with timeout
     shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer shutdownCancel()
-    
+
     if err := consumer.Stop(shutdownCtx); err != nil {
         log.Printf("Error stopping consumer: %v", err)
     }
@@ -322,6 +345,7 @@ func main() {
 ```
 
 ### 15. Saga Pattern (Distributed Transaction)
+
 ```go
 // Orchestrator publishes saga steps
 saga := []*bus.Outbound{
@@ -346,12 +370,16 @@ if err := reserveInventory(); err != nil {
 ## Key Configuration
 
 ### Bus Options
+
 - `bus.WithLogger(logger)` - Custom logger
 - `bus.WithMigrate(false)` - Skip auto-migration
 - `bus.WithMaxEnqueuePerBatch(n)` - Batch size (default: 100)
-- `bus.WithDialectDecorator(...)` - Add caching/metrics
+- `bus.WithCache(cache)` - Custom cache (default: built-in Ristretto cache)
+- `bus.WithoutCache()` - Disable caching
+- `bus.WithDialectDecorator(...)` - Add metrics/logging decorators
 
 ### Subscribe Options
+
 - `bus.WithPlanConfig(config)` - Retry policy, delays, deduplication
 - `bus.WithTTL(duration)` - Auto-expire subscription
 - `bus.WithAutoDrain(true)` - Auto-cleanup on unsubscribe
@@ -361,9 +389,10 @@ if err := reserveInventory(); err != nil {
 1. **Overlapping patterns in same queue**: Use separate queues for `"orders.>"` and `"orders.created"`
 2. **Missing acknowledgment**: Always call `msg.Done(ctx)` or `msg.Destroy(ctx)`
 3. **Consumer lifecycle**: Call `consumer.Stop(ctx)` in cleanup
-4. **Ephemeral queues**: Use `WithAutoDrain(true)` and call `Unsubscribe()`
-5. **TTL subscriptions**: Call `Heartbeat()` periodically
-6. **Subject validation**: Only lowercase, no wildcards in subjects (patterns can have wildcards)
+4. **Bus lifecycle**: Always call `bus.Close()` to release cache resources
+5. **Ephemeral queues**: Use `WithAutoDrain(true)` and call `Unsubscribe()`
+6. **TTL subscriptions**: Call `Heartbeat()` periodically
+7. **Subject validation**: Only lowercase, no wildcards in subjects (patterns can have wildcards)
 
 ## Dependencies
 

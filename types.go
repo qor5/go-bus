@@ -41,10 +41,12 @@ type Message struct {
 	//   - json.RawMessage (used as-is, without additional marshaling)
 	//   - []byte (treated as raw JSON bytes, equivalent to json.RawMessage)
 	//
-	// When receiving (Inbound), InboundFromArgs currently assigns a json.RawMessage
-	// containing the raw JSON payload to this field. Handlers can therefore rely
-	// on msg.Payload being a json.RawMessage for inbound messages, and may type-assert
-	// accordingly or unmarshal it into a concrete type.
+	// When receiving (Inbound), InboundFromArgs assigns the raw JSON payload as a
+	// json.RawMessage to Inbound.Payload (i.e., msg.Payload on *Inbound). For
+	// convenience and backwards compatibility, this same raw payload is also
+	// populated into Message.Payload. Inbound handlers should primarily use
+	// Inbound.Payload/msg.Payload (on the Inbound value) as the source of raw JSON
+	// and unmarshal it into concrete types as needed.
 	Payload any `json:"payload"`
 }
 

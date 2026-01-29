@@ -72,6 +72,7 @@ func TestBasicOperations(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 
 	ctx := context.Background()
 
@@ -130,6 +131,7 @@ func TestSubscriptionManagement(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 
 	ctx := context.Background()
 
@@ -180,6 +182,7 @@ func TestSubscriptionManagement(t *testing.T) {
 		cleanupAllTables()
 		b, err = pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		queue := b.Queue(testQueue)
 
@@ -239,6 +242,7 @@ func TestSubscriptionManagement(t *testing.T) {
 		cleanupAllTables()
 		b, err = pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		// Add some subscriptions
 		queue1 := b.Queue(testQueue)
@@ -273,6 +277,7 @@ func TestSubscriptionManagement(t *testing.T) {
 		cleanupAllTables()
 		b, err = pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		// Create similar subscriptions across multiple queues
 		queue1 := b.Queue(testQueue)
@@ -361,6 +366,7 @@ func setupBusAndQueues(t *testing.T) (bus.Bus, bus.Queue, bus.Queue) {
 // and multiple subscription matching scenarios.
 func TestPublish(t *testing.T) {
 	b, queue1, queue2 := setupBusAndQueues(t)
+	defer b.Close()
 
 	ctx := context.Background()
 
@@ -685,6 +691,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		ctx := context.Background()
 
@@ -736,6 +743,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		ctx := context.Background()
 
@@ -777,6 +785,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		ctx := context.Background()
 
@@ -796,6 +805,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		ctx := context.Background()
 
@@ -826,6 +836,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
+		defer b.Close()
 
 		ctx := context.Background()
 
@@ -1134,6 +1145,7 @@ func TestSubscriptionPlanConfig(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 
 	ctx := context.Background()
 
@@ -1172,6 +1184,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 	t.Logf("[%s] Bus instance created", time.Since(startTime))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1655,6 +1668,7 @@ func TestIndexedQueryEdgeCases(t *testing.T) {
 			// Create fresh bus instance
 			testBus, err := pgbus.New(db)
 			require.NoError(t, err, "Failed to create test Bus instance")
+			defer testBus.Close()
 
 			// Create a test queue and subscribe to all patterns
 			queue := testBus.Queue("edge_case_test_queue")
@@ -1693,6 +1707,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
+	defer b.Close()
 
 	t.Run("TTL Subscription Creation", func(t *testing.T) {
 		queue := b.Queue("test-ttl-queue")
@@ -1750,6 +1765,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		cleanupAllTables() // Clean up before this test
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
+		defer b.Close()
 
 		// Create regular subscription without TTL
 		queue := b.Queue("test-no-ttl-queue")
@@ -1781,6 +1797,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		cleanupAllTables() // Clean up before this test
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
+		defer b.Close()
 
 		queue := b.Queue("test-heartbeat-alive-queue")
 
@@ -1825,6 +1842,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
+	defer b.Close()
 
 	queue := b.Queue("test-filtering-queue")
 
@@ -1853,6 +1871,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		cleanupAllTables()
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
+		defer b.Close()
 		queue := b.Queue("test-filtering-queue2")
 
 		// Create subscription with 150ms TTL
@@ -1879,6 +1898,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		cleanupAllTables()
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
+		defer b.Close()
 		queue := b.Queue("test-filtering-queue3")
 
 		// Create one subscription with TTL that will expire
@@ -1914,6 +1934,7 @@ func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
+	defer b.Close()
 
 	queue := b.Queue("test-update-prevention-queue")
 
@@ -1937,6 +1958,7 @@ func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
 		cleanupAllTables()
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
+		defer b.Close()
 		queue := b.Queue("test-update-prevention-queue2")
 
 		// Create subscription with longer TTL
@@ -1963,6 +1985,7 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
+	defer b.Close()
 
 	queue := b.Queue("test-upsert-revive-queue")
 
@@ -2027,6 +2050,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 
 	ctx := context.Background()
 
@@ -2140,6 +2164,7 @@ func TestQueryJobsByPayload(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 
 	ctx := context.Background()
 
@@ -2183,6 +2208,7 @@ func TestSubscriptionDrain(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 
 	ctx := context.Background()
 
@@ -2473,6 +2499,7 @@ func TestAutoDrainOnUnsubscribe(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
+	defer b.Close()
 
 	ctx := context.Background()
 

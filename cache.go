@@ -70,6 +70,15 @@ func NewRistrettoCache(config *ristretto.Config[string, []Subscription]) (*ristr
 	return cache, nil
 }
 
+// WrapRistrettoCache wraps a ristretto cache into a Cache interface.
+// This is useful when you want to use WithCache with a ristretto cache.
+func WrapRistrettoCache(cache *ristretto.Cache[string, []Subscription]) Cache {
+	return &ristrettoCache{
+		scope: xid.New().String(),
+		cache: cache,
+	}
+}
+
 // RistrettoDecorator creates a decorator that adds caching functionality to the dialect.
 func RistrettoDecorator(cache *ristretto.Cache[string, []Subscription]) DialectDecorator {
 	if cache == nil {
@@ -98,7 +107,7 @@ func CacheDecorator(cache Cache) DialectDecorator {
 	if cache == nil {
 		panic("cache instance cannot be nil")
 	}
-	return func(d Dialect) (Dialect, error) {
+	return func(_ context.Context, d Dialect) (Dialect, error) {
 		return &cacheDialect{
 			Dialect: d,
 			cache:   cache,

@@ -27,7 +27,7 @@ go get github.com/qor5/go-bus
 import (
     "database/sql"
     "github.com/qor5/go-bus/pgbus"
-    _ "github.com/lib/pq"
+    _ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // Connect to PostgreSQL
@@ -41,6 +41,7 @@ bus, err := pgbus.New(db)
 if err != nil {
     log.Fatalf("Failed to create bus: %v", err)
 }
+defer bus.Close() // Always close the bus to release resources
 ```
 
 ### Consuming Messages

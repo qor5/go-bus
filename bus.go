@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dgraph-io/ristretto/v2"
 	"github.com/pkg/errors"
 	"github.com/qor5/go-bus/quex"
 	"github.com/qor5/go-que"
@@ -93,7 +94,8 @@ type BusImpl struct {
 	mu                 sync.RWMutex
 	queues             map[string]Queue
 	logger             *slog.Logger
-	maxEnqueuePerBatch int // Maximum number of plans that can be enqueued in a single transaction
+	maxEnqueuePerBatch int                                      // Maximum number of plans that can be enqueued in a single transaction
+	ownedCache         *ristretto.Cache[string, []Subscription] // Cache owned by this Bus instance, will be closed on Close()
 }
 
 // New creates a new Bus instance with the given dialect and options.
@@ -101,9 +103,14 @@ type BusImpl struct {
 // dialect is the database dialect used for storing subscriptions.
 // Different database backends can be supported by implementing this interface.
 // A PostgreSQL implementation is provided in the pgbus package.
-func New(dialect Dialect, opts ...BusOption) (Bus, error) {
+//
+// By default, a Ristretto cache is created to improve subscription lookup performance.
+// Use WithCache to provide a custom cache or disable caching (by passing nil).
+// The caller should call Close() when the Bus is no longer needed to release resources.
+func New(dialect Dialect, opts ...BusOption) (_ Bus, xerr error) {
 	busOpts := &BusOptions{
-		Migrate: true,
+		Migrate:      true,
+		CacheEnabled: true,
 	}
 
 	for _, opt := range opts {
@@ -117,10 +124,41 @@ func New(dialect Dialect, opts ...BusOption) (Bus, error) {
 		return nil, errors.New("go-que implementation is required")
 	}
 
+	var ownedCache *ristretto.Cache[string, []Subscription]
+	defer func() {
+		if xerr != nil && ownedCache != nil {
+			ownedCache.Close()
+		}
+	}()
+
+	// Handle cache setup
+	if busOpts.CacheEnabled {
+		if busOpts.Cache != nil {
+			// Use provided cache
+			busOpts.DialectDecorator = composeDecorators(
+				CacheDecorator(busOpts.Cache),
+				busOpts.DialectDecorator,
+			)
+		} else {
+			// Create default cache
+			cache, err := NewRistrettoCache(nil)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to create default cache")
+			}
+			ownedCache = cache
+			busOpts.DialectDecorator = composeDecorators(
+				RistrettoDecorator(cache),
+				busOpts.DialectDecorator,
+			)
+		}
+	}
+
+	ctx := context.Background()
+
 	// Apply dialect decorator if provided
 	if busOpts.DialectDecorator != nil {
 		var err error
-		dialect, err = busOpts.DialectDecorator(dialect)
+		dialect, err = busOpts.DialectDecorator(ctx, dialect)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to apply dialect decorator")
 		}
@@ -131,19 +169,65 @@ func New(dialect Dialect, opts ...BusOption) (Bus, error) {
 		queues:             make(map[string]Queue),
 		logger:             busOpts.Logger,
 		maxEnqueuePerBatch: busOpts.MaxEnqueuePerBatch,
+		ownedCache:         ownedCache,
 	}
-
 	if b.logger == nil {
 		b.logger = slog.Default()
 	}
+	defer func() {
+		if xerr != nil {
+			err := b.Close()
+			ownedCache = nil
+			if err != nil {
+				b.logger.Error("failed to close bus", "err", err)
+			}
+		}
+	}()
 
 	if busOpts.Migrate {
-		if err := dialect.Migrate(context.Background()); err != nil {
+		if err := dialect.Migrate(ctx); err != nil {
 			return nil, err
 		}
 	}
 
 	return b, nil
+}
+
+// composeDecorators composes multiple decorators into one.
+// Decorators are applied in order, with the first decorator being the outermost.
+func composeDecorators(decorators ...DialectDecorator) DialectDecorator {
+	var nonNil []DialectDecorator
+	for _, d := range decorators {
+		if d != nil {
+			nonNil = append(nonNil, d)
+		}
+	}
+	if len(nonNil) == 0 {
+		return nil
+	}
+	if len(nonNil) == 1 {
+		return nonNil[0]
+	}
+	return func(ctx context.Context, next Dialect) (Dialect, error) {
+		var err error
+		for i := len(nonNil) - 1; i >= 0; i-- {
+			next, err = nonNil[i](ctx, next)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return next, nil
+	}
+}
+
+// Close releases resources held by the Bus, including the default cache if one was created.
+// It is safe to call Close multiple times.
+func (b *BusImpl) Close() error {
+	if b.ownedCache != nil {
+		b.ownedCache.Close()
+		b.ownedCache = nil
+	}
+	return nil
 }
 
 // Queue returns a queue with the specified name.

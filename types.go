@@ -115,6 +115,10 @@ type Bus interface {
 
 	// BySubject returns all subscriptions with patterns matching the given subject.
 	BySubject(ctx context.Context, subject string) ([]Subscription, error)
+
+	// Close releases resources held by the Bus, including the default cache if one was created.
+	// It is safe to call Close multiple times.
+	Close() error
 }
 
 // Subscription represents an active subscription to a subject pattern.

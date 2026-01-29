@@ -12,6 +12,20 @@ import (
 	"github.com/rs/xid"
 )
 
+// Executor defines the common interface for database operations.
+// Both *sql.DB and *sql.Tx implement this interface, allowing code to work
+// with either a direct database connection or within a transaction context.
+type Executor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+var (
+	_ Executor = (*sql.DB)(nil)
+	_ Executor = (*sql.Tx)(nil)
+)
+
 // TransactionOption configures transaction behavior.
 type TransactionOption func(*transactionOptions)
 

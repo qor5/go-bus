@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -176,7 +177,12 @@ func descOfSubscription(sub Subscription) string {
 
 // Publish sends outbound messages to all queues with subscriptions matching the subject.
 // All messages are processed in a single transaction.
-func (b *BusImpl) Publish(ctx context.Context, msgs ...*Outbound) (_ *Dispatch, xerr error) {
+//
+// If a transaction is provided via bussql.NewContext in the context, Publish will use that
+// transaction (with a savepoint if enabled) instead of creating its own.
+// This is useful when you want to publish messages as part of a larger transaction that
+// includes other database operations.
+func (b *BusImpl) Publish(ctx context.Context, msgs ...*Outbound) (*Dispatch, error) {
 	if len(msgs) == 0 {
 		return &Dispatch{
 			Executions: []*SubscriptionExecution{},
@@ -287,25 +293,13 @@ func (b *BusImpl) Publish(ctx context.Context, msgs ...*Outbound) (_ *Dispatch, 
 		}, nil
 	}
 
-	tx, err := b.dialect.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to begin transaction")
-	}
-
-	panicked := true
-	defer func() {
-		if panicked || xerr != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	err = func() error {
+	err := b.dialect.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		batchSize := DefaultMaxEnqueuePerBatch
 		if b.maxEnqueuePerBatch > 0 {
 			batchSize = b.maxEnqueuePerBatch
 		}
 
-		ctx := que.WithSkipConflict(ctx)
+		ctx = que.WithSkipConflict(ctx)
 		goq := b.dialect.GoQue()
 		for i := 0; i < len(toBeExecuted); i += batchSize {
 			end := i + batchSize
@@ -335,14 +329,9 @@ func (b *BusImpl) Publish(ctx context.Context, msgs ...*Outbound) (_ *Dispatch, 
 			}
 		}
 		return nil
-	}()
-	panicked = false
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return nil, errors.Wrap(err, "failed to commit transaction")
 	}
 
 	return &Dispatch{

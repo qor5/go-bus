@@ -277,10 +277,6 @@ consumer, _ := queue.StartConsumer(ctx, handler,
 bus, _ := pgbus.New(db)
 defer bus.Close()
 
-// Custom cache (if you need to share cache across instances)
-bus, _ := pgbus.New(db, bus.WithCache(cache))
-defer bus.Close()
-
 // Disable cache if needed
 bus, _ := pgbus.New(db, bus.WithoutCache())
 defer bus.Close()
@@ -374,7 +370,6 @@ if err := reserveInventory(); err != nil {
 - `bus.WithLogger(logger)` - Custom logger
 - `bus.WithMigrate(false)` - Skip auto-migration
 - `bus.WithMaxEnqueuePerBatch(n)` - Batch size (default: 100)
-- `bus.WithCache(cache)` - Custom cache (default: built-in Ristretto cache)
 - `bus.WithoutCache()` - Disable caching
 - `bus.WithDialectDecorator(...)` - Add metrics/logging decorators
 

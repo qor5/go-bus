@@ -74,7 +74,8 @@ var MaxMigrationAttempts = 10
 // GetMetadata retrieves the current bus metadata
 func (d *Dialect) GetMetadata(ctx context.Context) (*bus.Metadata, error) {
 	var meta bus.Metadata
-	err := d.db.QueryRowContext(ctx,
+	exec := bussql.FromContext(ctx, d.db)
+	err := exec.QueryRowContext(ctx,
 		"SELECT version, updated_at, total_subscriptions FROM gobus_metadata LIMIT 1").
 		Scan(&meta.Version, &meta.UpdatedAt, &meta.TotalSubscriptions)
 	if err != nil {
@@ -289,7 +290,8 @@ func (d *Dialect) BySubject(ctx context.Context, subject string) ([]bus.Subscrip
 	}
 
 	query := buildSubscriptionQuery(where)
-	rows, err := d.db.QueryContext(ctx, query, args...)
+	exec := bussql.FromContext(ctx, d.db)
+	rows, err := exec.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to query subscriptions with strategy %s", d.queryStrategy)
 	}
@@ -305,7 +307,8 @@ func (d *Dialect) ByQueue(ctx context.Context, queue string) ([]bus.Subscription
 	}
 
 	query := buildSubscriptionQuery("queue = $1")
-	rows, err := d.db.QueryContext(ctx, query, queue)
+	exec := bussql.FromContext(ctx, d.db)
+	rows, err := exec.QueryContext(ctx, query, queue)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to query subscriptions")
 	}
@@ -316,7 +319,8 @@ func (d *Dialect) ByQueue(ctx context.Context, queue string) ([]bus.Subscription
 
 func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) (*subscription, error) {
 	query := buildSubscriptionQuery("queue = $1 AND pattern = $2")
-	rows, err := d.db.QueryContext(ctx, query, queue, pattern)
+	exec := bussql.FromContext(ctx, d.db)
+	rows, err := exec.QueryContext(ctx, query, queue, pattern)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to query subscription")
 	}
@@ -550,7 +554,8 @@ func (d *Dialect) updateHeartbeat(ctx context.Context, queue, pattern string) er
 		return err
 	}
 
-	result, err := d.db.ExecContext(ctx,
+	exec := bussql.FromContext(ctx, d.db)
+	result, err := exec.ExecContext(ctx,
 		`UPDATE gobus_subscriptions 
          SET expires_at = CASE 
                             WHEN (options->>'ttl')::bigint <= 0 THEN NULL 

@@ -29,10 +29,6 @@ This document outlines the planned enhancements for the PubSub system.
 - Add tests for heartbeat functionality including edge cases
 - Ensure proper separation between client-side heartbeat config and server-side subscription data
 
-## 2. Publish API Enhancements
-
-- Add support for custom database transactions (`tx`) in `Publish`.
-
 ## Implementation Priority
 
 1. Automatic Heartbeat Interval (improves reliability and operational simplicity)

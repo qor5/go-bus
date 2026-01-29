@@ -397,7 +397,7 @@ if err := reserveInventory(); err != nil {
 ## Dependencies
 
 - PostgreSQL 9.5+
-- `github.com/lib/pq` or compatible driver
+- `github.com/jackc/pgx/v5/stdlib` or compatible driver
 - `github.com/qor5/go-que`
 - Optional: `github.com/dgraph-io/ristretto/v2` (caching)
 

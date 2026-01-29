@@ -27,7 +27,7 @@ go get github.com/qor5/go-bus
 import (
     "database/sql"
     "github.com/qor5/go-bus/pgbus"
-    _ "github.com/lib/pq"
+    _ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // Connect to PostgreSQL

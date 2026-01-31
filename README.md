@@ -263,7 +263,7 @@ go-bus supports three types of topic matching patterns, following the NATS messa
 2. **Single-Level Wildcard (`*`)**: Matches any string in a single level
    - Example: `products.*.category.*.info` matches `products.xyz.category.abc.info` and `products.123.category.456.info`, but not `products.category.info` or `products.xyz.category.abc.def.info`
 
-3. **Multi-Level Wildcard (`>`)**: Matches zero or more levels
+3. **Multi-Level Wildcard (`>`)**: Matches one or more levels
    - Example: `orders.>` matches `orders.created`, `orders.updated`, and `orders.items.created`
 
 ## Important Notes

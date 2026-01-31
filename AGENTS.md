@@ -87,7 +87,6 @@ to orient automated agents to the build, test, and style conventions used here.
 - Use functional options for configuration (`WithPlanConfig`, `WithTTL`, etc.).
 - Use `time.Duration` for time intervals and TTLs.
 - Prefer strongly typed configuration structs (e.g., `PlanConfig`, `WorkerConfig`).
-- Avoid introducing interface{} in public API without explicit rationale.
 
 ### Context usage
 

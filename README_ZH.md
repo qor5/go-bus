@@ -218,7 +218,7 @@ podQueue := bus.Queue(podQueueName)
 consumer, err := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     log.Printf("实例 %s 收到广播消息: %s - %s",
         podQueueName, msg.Subject, string(msg.Payload))
-    return msg.Destory(ctx)
+    return msg.Destroy(ctx)
 })
 if err != nil {
     log.Printf("启动消费者失败: %v", err)
@@ -260,7 +260,7 @@ go-bus 支持三种主题匹配模式，遵循 NATS 消息系统的风格：
 2. **单级通配符 (`*`)**：匹配一个层级的任意字符串
    - 例如：`products.*.category.*.info` 匹配 `products.xyz.category.abc.info` 和 `products.123.category.456.info`，但不匹配 `products.category.info` 或 `products.xyz.category.abc.def.info`
 
-3. **多级通配符 (`>`)**：匹配零个或多个层级
+3. **多级通配符 (`>`)**：匹配一个或多个层级
    - 例如：`orders.>` 匹配 `orders.created`、`orders.updated` 和 `orders.items.created`
 
 ## 注意事项

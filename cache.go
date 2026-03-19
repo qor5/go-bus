@@ -125,7 +125,7 @@ type cacheDialect struct {
 
 func (c *cacheDialect) checkVersion(ctx context.Context) (bool, error) {
 	ch := c.sfg.DoChan("checkVersion", func() (any, error) {
-		meta, err := c.Dialect.GetMetadata(ctx)
+		meta, err := c.GetMetadata(ctx)
 		if err != nil {
 			return false, errors.Wrap(err, "failed to get metadata")
 		}

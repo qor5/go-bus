@@ -309,7 +309,7 @@ func (b *BusImpl) Publish(ctx context.Context, msgs ...*Outbound) (*Dispatch, er
 
 			execution.Status = ExecutionStatusExecuted
 
-			msgRaw, err := m.Message.ToRaw(sub)
+			msgRaw, err := m.ToRaw(sub)
 			if err != nil {
 				return nil, errors.Wrapf(err, "failed to convert message to raw format for subscription %s: %v", descOfSubscription(sub), m.Message)
 			}

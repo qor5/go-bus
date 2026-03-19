@@ -30,7 +30,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 func TestTransaction_Basic(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -49,7 +49,7 @@ func TestTransaction_Basic(t *testing.T) {
 
 func TestTransaction_Rollback(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -71,7 +71,7 @@ func TestTransaction_Rollback(t *testing.T) {
 
 func TestTransaction_Nested(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -107,7 +107,7 @@ func TestTransaction_Nested(t *testing.T) {
 	var names []string
 	rows, err := db.QueryContext(ctx, "SELECT name FROM users ORDER BY name")
 	assert.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name string
@@ -122,7 +122,7 @@ func TestTransaction_Nested(t *testing.T) {
 
 func TestTransaction_NestedSuccess(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -154,7 +154,7 @@ func TestTransaction_NestedSuccess(t *testing.T) {
 
 func TestTransaction_ContextCancellation(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -181,7 +181,7 @@ func TestTransaction_ContextCancellation(t *testing.T) {
 
 func TestTransaction_WithContextExecutor(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -207,7 +207,7 @@ func TestTransaction_WithContextExecutor(t *testing.T) {
 
 func TestTransaction_NestedWithContextPropagation(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -255,7 +255,7 @@ func TestTransaction_NestedWithContextPropagation(t *testing.T) {
 	var names []string
 	rows, err := db.QueryContext(ctx, "SELECT name FROM users ORDER BY name")
 	require.NoError(t, err, "Query should not error")
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name string
@@ -268,7 +268,7 @@ func TestTransaction_NestedWithContextPropagation(t *testing.T) {
 
 func TestTransaction_WithDisableSavepoint(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -303,7 +303,7 @@ func TestTransaction_WithDisableSavepoint(t *testing.T) {
 
 func TestTransaction_WithDisableSavepoint_NestedError(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 

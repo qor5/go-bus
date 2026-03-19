@@ -72,7 +72,7 @@ func TestBasicOperations(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 
@@ -131,7 +131,7 @@ func TestSubscriptionManagement(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 
@@ -182,7 +182,7 @@ func TestSubscriptionManagement(t *testing.T) {
 		cleanupAllTables()
 		b, err = pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		queue := b.Queue(testQueue)
 
@@ -242,7 +242,7 @@ func TestSubscriptionManagement(t *testing.T) {
 		cleanupAllTables()
 		b, err = pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		// Add some subscriptions
 		queue1 := b.Queue(testQueue)
@@ -277,7 +277,7 @@ func TestSubscriptionManagement(t *testing.T) {
 		cleanupAllTables()
 		b, err = pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		// Create similar subscriptions across multiple queues
 		queue1 := b.Queue(testQueue)
@@ -366,7 +366,7 @@ func setupBusAndQueues(t *testing.T) (bus.Bus, bus.Queue, bus.Queue) {
 // and multiple subscription matching scenarios.
 func TestPublish(t *testing.T) {
 	b, queue1, queue2 := setupBusAndQueues(t)
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 
@@ -691,7 +691,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		ctx := context.Background()
 
@@ -743,7 +743,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		ctx := context.Background()
 
@@ -785,7 +785,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		ctx := context.Background()
 
@@ -805,7 +805,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		ctx := context.Background()
 
@@ -836,7 +836,7 @@ func TestPublish(t *testing.T) {
 
 		b, err := pgbus.New(db)
 		require.NoError(t, err, "Failed to create Bus instance")
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		ctx := context.Background()
 
@@ -887,7 +887,7 @@ func getQueueJobs(t *testing.T, queueName string) []jobInfo {
 	// Query the database to get jobs for the specified queue
 	rows, err := db.Query("SELECT id, args FROM goque_jobs WHERE queue = $1", queueName)
 	require.NoError(t, err, "Failed to query jobs for queue "+queueName)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var jobs []jobInfo
 	for rows.Next() {
@@ -1145,7 +1145,7 @@ func TestSubscriptionPlanConfig(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 
@@ -1184,7 +1184,7 @@ func TestMultiQueueSubscription(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	t.Logf("[%s] Bus instance created", time.Since(startTime))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1668,7 +1668,7 @@ func TestIndexedQueryEdgeCases(t *testing.T) {
 			// Create fresh bus instance
 			testBus, err := pgbus.New(db)
 			require.NoError(t, err, "Failed to create test Bus instance")
-			defer testBus.Close()
+			defer func() { _ = testBus.Close() }()
 
 			// Create a test queue and subscribe to all patterns
 			queue := testBus.Queue("edge_case_test_queue")
@@ -1707,7 +1707,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	t.Run("TTL Subscription Creation", func(t *testing.T) {
 		queue := b.Queue("test-ttl-queue")
@@ -1765,7 +1765,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		cleanupAllTables() // Clean up before this test
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		// Create regular subscription without TTL
 		queue := b.Queue("test-no-ttl-queue")
@@ -1797,7 +1797,7 @@ func TestTTLAndHeartbeat(t *testing.T) {
 		cleanupAllTables() // Clean up before this test
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 
 		queue := b.Queue("test-heartbeat-alive-queue")
 
@@ -1842,7 +1842,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	queue := b.Queue("test-filtering-queue")
 
@@ -1871,7 +1871,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		cleanupAllTables()
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 		queue := b.Queue("test-filtering-queue2")
 
 		// Create subscription with 150ms TTL
@@ -1898,7 +1898,7 @@ func TestExpiredSubscriptionFiltering(t *testing.T) {
 		cleanupAllTables()
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 		queue := b.Queue("test-filtering-queue3")
 
 		// Create one subscription with TTL that will expire
@@ -1934,7 +1934,7 @@ func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	queue := b.Queue("test-update-prevention-queue")
 
@@ -1958,7 +1958,7 @@ func TestExpiredSubscriptionUpdatePrevention(t *testing.T) {
 		cleanupAllTables()
 		b, err := pgbus.New(db)
 		require.NoError(t, err)
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 		queue := b.Queue("test-update-prevention-queue2")
 
 		// Create subscription with longer TTL
@@ -1985,7 +1985,7 @@ func TestUpsertRevivesExpiredSubscription(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err)
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	queue := b.Queue("test-upsert-revive-queue")
 
@@ -2050,7 +2050,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 
@@ -2091,7 +2091,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
 	`, sub1.ID())
 	require.NoError(t, err, "Failed to query jobs by subscription ID")
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var count1 int
 	require.True(t, rows.Next())
@@ -2106,7 +2106,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
 	`, sub2.ID())
 	require.NoError(t, err, "Failed to query jobs by subscription ID")
-	defer rows2.Close()
+	defer func() { _ = rows2.Close() }()
 
 	var count2 int
 	require.True(t, rows2.Next())
@@ -2121,7 +2121,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 		WHERE args::jsonb->0->'header'->'Subscription-Identifier'->>0 = $1
 	`, "99999")
 	require.NoError(t, err, "Should not error for non-existent subscription ID")
-	defer rows3.Close()
+	defer func() { _ = rows3.Close() }()
 
 	var count3 int
 	require.True(t, rows3.Next())
@@ -2136,7 +2136,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 		WHERE args::jsonb->0->'header'->'Subscription-Identifier' ? $1
 	`, sub1.ID())
 	require.NoError(t, err, "Failed to query jobs by subscription ID containment")
-	defer rows4.Close()
+	defer func() { _ = rows4.Close() }()
 
 	var count4 int
 	require.True(t, rows4.Next())
@@ -2150,7 +2150,7 @@ func TestQueryJobsBySubscriptionID(t *testing.T) {
 		WHERE args::jsonb->0->'header'->'Subscription-Identifier' @> $1::jsonb
 	`, fmt.Sprintf("[%q]", sub2.ID()))
 	require.NoError(t, err, "Failed to query jobs by subscription ID containment with @>")
-	defer rows5.Close()
+	defer func() { _ = rows5.Close() }()
 
 	var count5 int
 	require.True(t, rows5.Next())
@@ -2164,7 +2164,7 @@ func TestQueryJobsByPayload(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 
@@ -2208,7 +2208,7 @@ func TestSubscriptionDrain(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 
@@ -2499,7 +2499,7 @@ func TestAutoDrainOnUnsubscribe(t *testing.T) {
 
 	b, err := pgbus.New(db)
 	require.NoError(t, err, "Failed to create Bus instance")
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	ctx := context.Background()
 

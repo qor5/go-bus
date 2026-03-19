@@ -277,14 +277,14 @@ func BenchmarkDialectBySubject(b *testing.B) {
 				if err != nil {
 					b.Fatalf("failed to create cached bus: %v", err)
 				}
-				defer testBus.Close()
+				defer func() { _ = testBus.Close() }()
 			} else {
 				var err error
 				testBus, err = pgbus.New(db, bus.WithMigrate(false), bus.WithoutCache())
 				if err != nil {
 					b.Fatalf("failed to create bus: %v", err)
 				}
-				defer testBus.Close()
+				defer func() { _ = testBus.Close() }()
 			}
 
 			for _, scale := range scales {

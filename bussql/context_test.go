@@ -13,7 +13,7 @@ import (
 
 func TestFromContext_NoExecutorInContext(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -24,7 +24,7 @@ func TestFromContext_NoExecutorInContext(t *testing.T) {
 
 func TestFromContext_WithExecutorInContext(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -43,11 +43,11 @@ func TestFromContext_WithExecutorInContext(t *testing.T) {
 
 func TestFromContext_WithDBInContext(t *testing.T) {
 	db1 := setupTestDB(t)
-	defer db1.Close()
+	defer func() { _ = db1.Close() }()
 
 	db2, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err, "Failed to open second database")
-	defer db2.Close()
+	defer func() { _ = db2.Close() }()
 
 	ctx := context.Background()
 
@@ -62,7 +62,7 @@ func TestFromContext_WithDBInContext(t *testing.T) {
 
 func TestNewContext_OverwritesPreviousExecutor(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -95,7 +95,7 @@ func TestFromContext_NilFallback(t *testing.T) {
 
 func TestNewContext_NilExecutor(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 

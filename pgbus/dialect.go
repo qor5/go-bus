@@ -295,7 +295,7 @@ func (d *Dialect) BySubject(ctx context.Context, subject string) ([]bus.Subscrip
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to query subscriptions with strategy %s", d.queryStrategy)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return d.scanSubscriptions(rows)
 }
@@ -312,7 +312,7 @@ func (d *Dialect) ByQueue(ctx context.Context, queue string) ([]bus.Subscription
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to query subscriptions")
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return d.scanSubscriptions(rows)
 }
@@ -324,7 +324,7 @@ func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) 
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to query subscription")
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	subs, err := d.scanSubscriptions(rows)
 	if err != nil {
@@ -422,7 +422,7 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 		if err != nil {
 			return errors.Wrap(err, "failed to insert or update subscription")
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 
 		subs, err := d.scanSubscriptions(rows)
 		if err != nil {

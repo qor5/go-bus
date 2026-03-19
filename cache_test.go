@@ -18,7 +18,7 @@ func TestCacheDecorator(t *testing.T) {
 	// Create a bus without cache first - used for comparison
 	standardBus, err := pgbus.New(db, bus.WithMigrate(true), bus.WithoutCache())
 	require.NoError(t, err, "Failed to create standard Bus instance")
-	defer standardBus.Close()
+	defer func() { _ = standardBus.Close() }()
 
 	// Create a bus with custom cache
 	ristrettoCache, err := bus.NewRistrettoCache(nil)
@@ -30,7 +30,7 @@ func TestCacheDecorator(t *testing.T) {
 		bus.WithCache(bus.WrapRistrettoCache(ristrettoCache)),
 	)
 	require.NoError(t, err, "Failed to create cached Bus instance")
-	defer cachedBus.Close()
+	defer func() { _ = cachedBus.Close() }()
 
 	ctx := context.Background()
 
@@ -191,7 +191,7 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
-		defer cachedBus.Close()
+		defer func() { _ = cachedBus.Close() }()
 
 		queue := cachedBus.Queue("test-cache-ttl-queue")
 
@@ -224,7 +224,7 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
-		defer cachedBus.Close()
+		defer func() { _ = cachedBus.Close() }()
 
 		queue := cachedBus.Queue("test-cache-ttl-refresh-queue")
 
@@ -256,7 +256,7 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
-		defer cachedBus.Close()
+		defer func() { _ = cachedBus.Close() }()
 
 		queue := cachedBus.Queue("test-cache-mixed-queue")
 
@@ -307,7 +307,7 @@ func TestCacheWithTTLIntegration(t *testing.T) {
 			bus.WithCache(cache),
 		)
 		require.NoError(t, err)
-		defer cachedBus.Close()
+		defer func() { _ = cachedBus.Close() }()
 
 		queue := cachedBus.Queue("test-cache-efficiency-queue")
 

@@ -240,8 +240,8 @@ github.com/qor5/confx v0.0.0-20250426065316-0d28db5b4d54 h1:sO/saPkFgwfLaiCVTg+e
 github.com/qor5/confx v0.0.0-20250426065316-0d28db5b4d54/go.mod h1:03dPo1SHYn9sU57mH67Y1p9FIcglWaHr4i/xkeYmX4o=
 github.com/qor5/go-que v1.1.0 h1:jv7BYovZTXRwpshzvaolZezVILlny++AjeMdV/MV/Tc=
 github.com/qor5/go-que v1.1.0/go.mod h1:TSB15i8+bfrNCNYk6qcldIfPB9ubKbfFT7FwxgKvh4Q=
-github.com/qor5/x/v3 v3.2.1-0.20260512062513-2ee630cec6e0 h1:IbgsrYwAlFduDI83u/wYgnDt+MxMfns2pyG1F41274E=
-github.com/qor5/x/v3 v3.2.1-0.20260512062513-2ee630cec6e0/go.mod h1:y/9Or1Q4jOHezDVdYu/m29ZbRcmSKqwebrdTiOh8ZZ8=
+github.com/qor5/x/v3 v3.2.1-0.20260513111456-ce22ad0a7920 h1:X6g0LhxqY1s8QlngjQsPwi2PuYcq9Hb358+9a5CTKTE=
+github.com/qor5/x/v3 v3.2.1-0.20260513111456-ce22ad0a7920/go.mod h1:y/9Or1Q4jOHezDVdYu/m29ZbRcmSKqwebrdTiOh8ZZ8=
 github.com/redis/go-redis/v9 v9.16.0 h1:OotgqgLSRCmzfqChbQyG1PHC3tLNR89DG4jdOERSEP4=
 github.com/redis/go-redis/v9 v9.16.0/go.mod h1:u410H11HMLoB+TP67dz8rL9s6QW2j76l0//kSOd3370=
 github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=

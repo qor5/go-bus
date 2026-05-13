@@ -12,27 +12,34 @@ import (
 	"github.com/qor5/go-bus"
 	"github.com/qor5/go-bus/pgbus"
 	"github.com/qor5/go-que"
+	"github.com/qor5/x/v3/gormx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/theplant/testenv"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 var db *sql.DB
 
 func TestMain(m *testing.M) {
-	env, err := testenv.New().DBEnable(true).SetUp()
+	ctx := context.Background()
+	container, err := gormx.OpenContainer(ctx, nil)
 	if err != nil {
 		panic(err)
 	}
-	defer func() { _ = env.TearDown() }()
+	defer func() { _ = container.Terminate(ctx) }()
 
-	db, err = env.DB.DB()
+	gdb, err := gorm.Open(postgres.Open(container.DSN), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+
+	db, err = gdb.DB()
 	if err != nil {
 		panic(err)
 	}
 
 	// Initialize database schema directly - Migrate handles tables that may already exist
-	ctx := context.Background()
 	if err := pgbus.Migrate(ctx, db); err != nil {
 		panic(fmt.Sprintf("Failed to migrate database: %v", err))
 	}

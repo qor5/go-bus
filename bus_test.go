@@ -15,26 +15,17 @@ import (
 	"github.com/qor5/x/v3/gormx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
 var db *sql.DB
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
-	container, err := gormx.OpenContainer(ctx, nil)
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = container.Terminate(ctx) }()
+	suite := gormx.MustStartTestSuite(ctx)
+	defer func() { _ = suite.Stop(ctx) }()
 
-	gdb, err := gorm.Open(postgres.Open(container.DSN), &gorm.Config{})
-	if err != nil {
-		panic(err)
-	}
-
-	db, err = gdb.DB()
+	var err error
+	db, err = suite.DB().DB()
 	if err != nil {
 		panic(err)
 	}

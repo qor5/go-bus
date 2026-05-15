@@ -8,7 +8,7 @@ require (
 	github.com/mattn/go-sqlite3 v2.0.3+incompatible
 	github.com/pkg/errors v0.9.1
 	github.com/qor5/go-que v1.1.0
-	github.com/qor5/x/v3 v3.2.1-0.20260512062513-2ee630cec6e0
+	github.com/qor5/x/v3 v3.2.1-0.20260513111456-ce22ad0a7920
 	github.com/rs/xid v1.6.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.20.0

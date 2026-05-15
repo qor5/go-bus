@@ -14,8 +14,6 @@ import (
 	"github.com/qor5/x/v3/gormx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
 const (
@@ -40,15 +38,10 @@ type UserUpdate struct {
 // TestCIAMBusinessMarketingIntegration simulates communication between CIAM, Business, and Marketing
 // systems through go-bus based on the sequence diagram.
 func TestCIAMBusinessMarketingIntegration(t *testing.T) {
-	ctx0 := context.Background()
-	container, err := gormx.OpenContainer(ctx0, nil)
-	require.NoError(t, err, "Failed to create test container")
-	defer func() { _ = container.Terminate(ctx0) }()
+	suite := gormx.MustStartTestSuite(context.Background())
+	defer func() { _ = suite.Stop(context.Background()) }()
 
-	gdb, err := gorm.Open(postgres.Open(container.DSN), &gorm.Config{})
-	require.NoError(t, err, "Failed to open gorm")
-
-	db, err := gdb.DB()
+	db, err := suite.DB().DB()
 	require.NoError(t, err, "Failed to get database connection")
 
 	ctx, cancel := context.WithCancel(context.Background())

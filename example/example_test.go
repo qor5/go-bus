@@ -38,9 +38,8 @@ type UserUpdate struct {
 // TestCIAMBusinessMarketingIntegration simulates communication between CIAM, Business, and Marketing
 // systems through go-bus based on the sequence diagram.
 func TestCIAMBusinessMarketingIntegration(t *testing.T) {
-	ctx0 := context.Background()
-	suite := gormx.MustStartTestSuite(ctx0)
-	defer func() { _ = suite.Stop(ctx0) }()
+	suite := gormx.MustStartTestSuite(context.Background())
+	defer func() { _ = suite.Stop(context.Background()) }()
 
 	db, err := suite.DB().DB()
 	require.NoError(t, err, "Failed to get database connection")

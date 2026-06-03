@@ -8,12 +8,10 @@ require (
 	github.com/mattn/go-sqlite3 v2.0.3+incompatible
 	github.com/pkg/errors v0.9.1
 	github.com/qor5/go-que v1.1.0
-	github.com/qor5/x/v3 v3.2.1-0.20260513111456-ce22ad0a7920
+	github.com/qor5/x/v3 v3.2.1-0.20260602032452-ea2dcdcd625e
 	github.com/rs/xid v1.6.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.20.0
-	gorm.io/driver/postgres v1.6.0
-	gorm.io/gorm v1.31.1
 )
 
 require (
@@ -135,4 +133,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/datatypes v1.2.7 // indirect
 	gorm.io/driver/mysql v1.5.6 // indirect
+	gorm.io/driver/postgres v1.6.0 // indirect
+	gorm.io/gorm v1.31.1 // indirect
 )

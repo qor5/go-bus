@@ -46,6 +46,17 @@ type StartWorkerOptions struct {
 	// ReconnectBackOff defines the backoff strategy for reconnection attempts.
 	// If nil, DefaultReconnectBackOffFactory() will be used.
 	ReconnectBackOff backoff.BackOff
+
+	// OnStop, when set, is invoked exactly once when the worker goroutine
+	// exits. Its argument is the real Worker.Run() failure when the worker
+	// terminated abnormally (the reconnect backoff gave up, or a worker could
+	// not be recreated), or nil on a clean Stop(). It is the real run error
+	// rather than the generic ErrReconnectBackOffStopped that Err() reports.
+	//
+	// Worker death happens in the lock loop, outside the Perform function, so
+	// it is invisible to per-job instrumentation; OnStop is the hook to wire
+	// error reporting (e.g. an error notifier) without coupling quex to it.
+	OnStop func(err error)
 }
 
 // StartWorkerOption represents an option function for configuring a worker.
@@ -62,6 +73,14 @@ func WithLogger(logger *slog.Logger) StartWorkerOption {
 func WithReconnectBackOff(b backoff.BackOff) StartWorkerOption {
 	return func(opts *StartWorkerOptions) {
 		opts.ReconnectBackOff = b
+	}
+}
+
+// WithOnStop sets the callback invoked once when the worker stops. See
+// StartWorkerOptions.OnStop.
+func WithOnStop(fn func(err error)) StartWorkerOption {
+	return func(opts *StartWorkerOptions) {
+		opts.OnStop = fn
 	}
 }
 
@@ -112,12 +131,26 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 	// Start a goroutine to run the worker
 	go func() (xerr error) {
 		defer close(workerDoneC)
+		// lastRunErr holds the most recent Worker.Run() error. On terminal exit
+		// it is the real cause to report — xerr is often the generic
+		// ErrReconnectBackOffStopped wrapper, which hides what actually broke.
+		var lastRunErr error
 		// Ensure worker lifecycle ends when goroutine exits for any reason
 		defer func() {
 			if xerr != nil {
 				logger.ErrorContext(workerCtx, "Worker stopped with error", "error", xerr)
 			} else {
 				logger.InfoContext(workerCtx, "Worker stopped")
+			}
+			if opts.OnStop != nil {
+				var cause error
+				if xerr != nil {
+					cause = xerr
+					if lastRunErr != nil {
+						cause = lastRunErr
+					}
+				}
+				opts.OnStop(cause)
 			}
 			workerCancel(xerr)
 		}()
@@ -135,6 +168,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 			if errors.Is(err, que.ErrWorkerStoped) {
 				return nil
 			}
+			lastRunErr = err
 
 			logger.WarnContext(workerCtx, "Worker error, will attempt to recreate", "error", err)
 

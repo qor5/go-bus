@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/dgraph-io/ristretto/v2 v2.3.0
-	github.com/mattn/go-sqlite3 v2.0.3+incompatible
+	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/pkg/errors v0.9.1
 	github.com/qor5/go-que v1.1.0
 	github.com/qor5/x/v3 v3.2.1-0.20260602032452-ea2dcdcd625e
@@ -135,4 +135,16 @@ require (
 	gorm.io/driver/mysql v1.5.6 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
 	gorm.io/gorm v1.31.1 // indirect
+)
+
+// v2.0.x of go-sqlite3 were tagged by accident (in 2020, bundling SQLite
+// 3.31.1) and are retracted, yet a requirement on one, from
+// github.com/qor5/x/v3 that this module's tests use, still selects it over
+// v1.14.x. Excluded here, the version this go.mod requires is v1.14.x, and so
+// is the one every module depending on this one gets.
+exclude (
+	github.com/mattn/go-sqlite3 v2.0.0+incompatible
+	github.com/mattn/go-sqlite3 v2.0.1+incompatible
+	github.com/mattn/go-sqlite3 v2.0.2+incompatible
+	github.com/mattn/go-sqlite3 v2.0.3+incompatible
 )

@@ -88,6 +88,27 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 
 var _ Bus = (*BusImpl)(nil)
 
+// DefaultUnsubscribeExpiredLimit bounds the subscriptions one
+// UnsubscribeExpired call handles.
+const DefaultUnsubscribeExpiredLimit = 100
+
+// UnsubscribeExpired unsubscribes, on their owners' behalf, subscriptions
+// whose TTL ran out without a heartbeat, the owner crashed say: nothing is
+// delivered to them any more, and no heartbeat can revive them. Each is
+// unsubscribed as Unsubscribe would (soft-deleted, its pending jobs drained
+// if it was subscribed with WithAutoDrain; jobs already retried are kept, as
+// Drain keeps them). It handles at most DefaultUnsubscribeExpiredLimit
+// subscriptions a call, oldest first, each in short transactions, so call it
+// periodically (from a heartbeat loop, say). It returns how many it
+// unsubscribed. A dialect that cannot do this unsubscribes nothing.
+func (b *BusImpl) UnsubscribeExpired(ctx context.Context) (int, error) {
+	u, ok := b.dialect.(ExpiredUnsubscriber)
+	if !ok {
+		return 0, nil
+	}
+	return u.UnsubscribeExpired(ctx, DefaultUnsubscribeExpiredLimit)
+}
+
 // BusImpl is a generic implementation of the Bus interface.
 type BusImpl struct {
 	dialect            Dialect

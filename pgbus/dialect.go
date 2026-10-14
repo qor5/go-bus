@@ -494,6 +494,135 @@ func (d *Dialect) drainInTx(ctx context.Context, tx *sql.Tx, queue, pattern stri
 	return int(deletedCount), nil
 }
 
+// drainBatch bounds the jobs one statement of UnsubscribeExpired's drain
+// deletes, so that no transaction locks too many rows at once.
+const drainBatch = 1000
+
+var _ bus.ExpiredUnsubscriber = (*Dialect)(nil)
+
+// UnsubscribeExpired unsubscribes up to limit subscriptions whose TTL ran out
+// (by the database's clock), oldest first. Each one's soft delete is a short
+// transaction of its own; if it was subscribed with auto-drain, its pending
+// jobs are then deleted drainBatch at a time, each batch committed on its
+// own, skipping jobs being performed and jobs already retried, as drain does.
+// Nothing is delivered to an expired subscription, so draining after the
+// soft delete loses nothing a same-transaction drain would keep.
+func (d *Dialect) UnsubscribeExpired(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	exec := bussql.FromContext(ctx, d.db)
+	rows, err := exec.QueryContext(ctx,
+		`SELECT queue, pattern FROM gobus_subscriptions
+         WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW()
+         ORDER BY expires_at
+         LIMIT $1`, limit)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to find expired subscriptions")
+	}
+	type sub struct{ queue, pattern string }
+	var expired []sub
+	for rows.Next() {
+		var s sub
+		if err := rows.Scan(&s.queue, &s.pattern); err != nil {
+			_ = rows.Close()
+			return 0, errors.Wrap(err, "failed to scan expired subscription")
+		}
+		expired = append(expired, s)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, errors.Wrap(err, "failed to find expired subscriptions")
+	}
+
+	n := 0
+	for _, s := range expired {
+		drain, done, err := d.deleteExpired(ctx, s.queue, s.pattern)
+		if err != nil {
+			return n, err
+		}
+		if !done {
+			continue // revived or unsubscribed meanwhile
+		}
+		n++
+		if drain {
+			if err := d.drainInBatches(ctx, s.queue, s.pattern); err != nil {
+				return n, err
+			}
+		}
+	}
+	return n, nil
+}
+
+// deleteExpired soft-deletes the subscription of queue and pattern if it is
+// still expired, and reports whether it did and whether it asked for
+// auto-drain.
+func (d *Dialect) deleteExpired(ctx context.Context, queue, pattern string) (drain, done bool, err error) {
+	err = d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var optionsData []byte
+		err := tx.QueryRowContext(ctx,
+			`UPDATE gobus_subscriptions
+             SET deleted_at = NOW(), updated_at = NOW()
+             WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
+               AND expires_at IS NOT NULL AND expires_at <= NOW()
+             RETURNING options`,
+			queue, pattern,
+		).Scan(&optionsData)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return errors.Wrap(err, "failed to soft delete expired subscription")
+		}
+		done = true
+		var options bus.SubscribeOptions
+		if json.Unmarshal(optionsData, &options) == nil {
+			drain = options.AutoDrain
+		}
+		return d.updateMetadata(ctx, tx)
+	})
+	return drain, done, err
+}
+
+// drainInBatches deletes the pending jobs of an unsubscribed subscription,
+// drainBatch at a time in id order, with drainInTx's conditions; a job being
+// performed is skipped and the next batch goes on after it.
+func (d *Dialect) drainInBatches(ctx context.Context, queue, pattern string) error {
+	var after int64
+	for {
+		var picked int
+		err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			var last sql.NullInt64
+			err := tx.QueryRowContext(ctx, `
+				WITH batch AS (
+					SELECT id FROM goque_jobs
+					WHERE queue = $1
+					  AND args::jsonb->0->'header'->'`+bus.HeaderSubscriptionPattern+`'->>0 = $2
+					  AND (done_at IS NULL AND expired_at IS NULL AND retry_count = 0)
+					  AND id > $3
+					ORDER BY id
+					LIMIT $4
+				), deleted AS (
+					DELETE FROM goque_jobs
+					WHERE id IN (SELECT id FROM batch) AND pg_try_advisory_xact_lock(id)
+				)
+				SELECT COUNT(*), MAX(id) FROM batch`,
+				queue, pattern, after, drainBatch).Scan(&picked, &last)
+			if err != nil {
+				return errors.Wrap(err, "failed to drain expired subscription jobs")
+			}
+			after = last.Int64
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if picked < drainBatch {
+			return nil
+		}
+	}
+}
+
 // delete performs soft delete of a subscription for the given queue and pattern.
 // If autoDrain is enabled in the subscription options, it will automatically
 // drain all pending jobs for the subscription in the same transaction.

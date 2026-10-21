@@ -2,13 +2,13 @@ package bus
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/pkg/errors"
 	"github.com/rs/xid"
-	"golang.org/x/sync/singleflight"
 )
 
 var _ Dialect = (*cacheDialect)(nil)
@@ -119,12 +119,12 @@ func CacheDecorator(cache Cache) DialectDecorator {
 type cacheDialect struct {
 	Dialect
 	cache   Cache
-	sfg     singleflight.Group
+	flights freshFlights
 	version int64 // Database version, accessed atomically
 }
 
 func (c *cacheDialect) checkVersion(ctx context.Context) (bool, error) {
-	ch := c.sfg.DoChan("checkVersion", func() (any, error) {
+	val, err := c.flights.do(ctx, "checkVersion", func() (any, error) {
 		meta, err := c.GetMetadata(ctx)
 		if err != nil {
 			return false, errors.Wrap(err, "failed to get metadata")
@@ -137,13 +137,10 @@ func (c *cacheDialect) checkVersion(ctx context.Context) (bool, error) {
 
 		return false, nil // Cache was not cleared
 	})
-
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case res := <-ch:
-		return res.Val.(bool), res.Err
+	if err != nil {
+		return false, err
 	}
+	return val.(bool), nil
 }
 
 // getCachedSubscriptionsIfValid retrieves cached subscriptions if they exist and are not expired.
@@ -179,7 +176,7 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 		}
 	}
 
-	ch := c.sfg.DoChan(cacheKey, func() (any, error) {
+	val, err := c.flights.do(ctx, cacheKey, func() (any, error) {
 		// Double-check cache after acquiring lock (another goroutine might have updated it)
 		if subs, found := c.getCachedSubscriptionsIfValid(cacheKey); found {
 			return subs, nil
@@ -203,14 +200,69 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 
 		return subs, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return val.([]Subscription), nil
+}
+
+// freshFlights coalesces concurrent calls by key, like singleflight, except
+// that a caller never gets the result of a call that started before it
+// arrived: one that read the database earlier may miss a subscription
+// committed before the caller began. A caller that finds a call running
+// waits for the next one, which starts when the running one ends and which
+// every caller arriving meanwhile shares.
+type freshFlights struct {
+	mu      sync.Mutex
+	running map[string]*freshCall
+	next    map[string]*freshCall
+}
+
+type freshCall struct {
+	fn   func() (any, error)
+	done chan struct{}
+	val  any
+	err  error
+}
+
+func (f *freshFlights) do(ctx context.Context, key string, fn func() (any, error)) (any, error) {
+	f.mu.Lock()
+	if f.running == nil {
+		f.running = map[string]*freshCall{}
+		f.next = map[string]*freshCall{}
+	}
+	call := f.next[key]
+	switch {
+	case f.running[key] == nil:
+		call = &freshCall{fn: fn, done: make(chan struct{})}
+		f.running[key] = call
+		go f.run(key, call)
+	case call == nil:
+		call = &freshCall{fn: fn, done: make(chan struct{})}
+		f.next[key] = call
+	}
+	f.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		return res.Val.([]Subscription), nil
+	case <-call.done:
+		return call.val, call.err
 	}
+}
+
+func (f *freshFlights) run(key string, call *freshCall) {
+	call.val, call.err = call.fn()
+	close(call.done)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	next := f.next[key]
+	delete(f.next, key)
+	if next == nil {
+		delete(f.running, key)
+		return
+	}
+	f.running[key] = next
+	go f.run(key, next)
 }

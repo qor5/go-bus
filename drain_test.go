@@ -158,8 +158,8 @@ func mustSubscriptions(t *testing.T, q bus.Queue) []bus.Subscription {
 }
 
 // TestUnsubscribeResumesAnInterruptedDrain verifies that an Unsubscribe whose
-// drain is cut short leaves the subscription in place, and that calling it
-// again finishes.
+// drain is cut short leaves the subscription expired but not deleted, and
+// that calling it again finishes.
 func TestUnsubscribeResumesAnInterruptedDrain(t *testing.T) {
 	b, _, _ := setupBusAndQueues(t)
 	defer func() { _ = b.Close() }()
@@ -174,7 +174,10 @@ func TestUnsubscribeResumesAnInterruptedDrain(t *testing.T) {
 	defer cancel()
 	require.Error(t, sub.Unsubscribe(short))
 	require.NoError(t, blocker.Rollback())
-	assert.Len(t, mustSubscriptions(t, q), 1, "still subscribed")
+	assert.Empty(t, mustSubscriptions(t, q), "expired at once")
+	var rows int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM gobus_subscriptions WHERE queue = 'cut' AND deleted_at IS NULL`).Scan(&rows))
+	assert.Equal(t, 1, rows, "but not deleted yet")
 	assert.Equal(t, 500, queueJobs(t, "cut"), "the first batch was drained")
 
 	require.NoError(t, sub.Unsubscribe(ctx))
@@ -209,4 +212,63 @@ func TestDrainKeepsAJobRetriedDuringTheDrain(t *testing.T) {
 	require.NoError(t, r.err)
 	assert.Equal(t, 2, r.n)
 	assert.Equal(t, 1, queueJobs(t, "retry"), "the retried job is kept")
+}
+
+// TestSubscribeDuringUnsubscribeKeepsTheSubscription verifies that a
+// Subscribe with the same options as a subscription being unsubscribed
+// leaves a live subscription once both are done, rather than handing back
+// the old one that the unsubscribe then removes.
+func TestSubscribeDuringUnsubscribeKeepsTheSubscription(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("same")
+	subscribe := func() (bus.Subscription, error) { return q.Subscribe(ctx, "same.topic", bus.WithAutoDrain(true)) }
+	sub, err := subscribe()
+	require.NoError(t, err)
+	publishMany(t, b, "same.topic", 1500)
+	blocker := holdJob(t, "same", 999) // the last job of the first batch
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	subscribed := make(chan error, 1)
+	go func() { _, err := subscribe(); subscribed <- err }()
+	// The Subscribe returns at once, or waits for the batch.
+	require.Eventually(t, func() bool { return len(subscribed) == 1 || lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, blocker.Commit())
+	require.NoError(t, <-unsubscribed)
+	require.NoError(t, <-subscribed)
+
+	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe wins")
+}
+
+// TestSubscribeWaitsForAnUnsubscribeThatCameFirst verifies that a Subscribe
+// with the same options does not return a subscription an Unsubscribe that
+// came first is about to remove: it waits for the row, and then replaces it.
+func TestSubscribeWaitsForAnUnsubscribeThatCameFirst(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("first")
+	subscribe := func() (bus.Subscription, error) { return q.Subscribe(ctx, "first.topic") }
+	sub, err := subscribe()
+	require.NoError(t, err)
+	holder, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = holder.Rollback() }()
+	_, err = holder.Exec(`SELECT id FROM gobus_subscriptions WHERE queue = 'first' AND deleted_at IS NULL FOR UPDATE`)
+	require.NoError(t, err)
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	subscribed := make(chan error, 1)
+	go func() { _, err := subscribe(); subscribed <- err }()
+	require.Eventually(t, func() bool { return len(subscribed) == 1 || lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, holder.Commit())
+	require.NoError(t, <-unsubscribed)
+	require.NoError(t, <-subscribed)
+
+	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe wins")
 }

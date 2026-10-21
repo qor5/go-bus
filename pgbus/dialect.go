@@ -317,10 +317,11 @@ func (d *Dialect) ByQueue(ctx context.Context, queue string) ([]bus.Subscription
 	return d.scanSubscriptions(rows)
 }
 
-func (d *Dialect) byQueueAndPattern(ctx context.Context, queue, pattern string) (*subscription, error) {
-	query := buildSubscriptionQuery("queue = $1 AND pattern = $2")
-	exec := bussql.FromContext(ctx, d.db)
-	rows, err := exec.QueryContext(ctx, query, queue, pattern)
+// byQueueAndPattern finds the live subscription of queue and pattern and locks
+// its row until tx ends.
+func (d *Dialect) byQueueAndPattern(ctx context.Context, tx *sql.Tx, queue, pattern string) (*subscription, error) {
+	query := buildSubscriptionQuery("queue = $1 AND pattern = $2") + " FOR UPDATE"
+	rows, err := tx.QueryContext(ctx, query, queue, pattern)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to query subscription")
 	}
@@ -367,27 +368,29 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
 		ttlMicroseconds = int64(opts.TTL.Microseconds())
 	}
 
-	existingSub, err := d.byQueueAndPattern(ctx, queue, pattern)
-	if err != nil && !errors.Is(err, bus.ErrSubscriptionNotFound) {
-		return nil, err
-	}
+	var resultSub bus.Subscription
+	err = d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Locked, so that an Unsubscribe either waits for this transaction or
+		// has expired the subscription already, which then is replaced here.
+		existingSub, err := d.byQueueAndPattern(ctx, tx, queue, pattern)
+		if err != nil && !errors.Is(err, bus.ErrSubscriptionNotFound) {
+			return err
+		}
 
-	// Skip update if subscription exists and is identical
-	if existingSub != nil {
-		if existingSub.pattern == pattern &&
+		// Skip update if subscription exists and is identical
+		if existingSub != nil &&
+			existingSub.pattern == pattern &&
 			existingSub.queue == queue &&
 			existingSub.regexPattern == regexPattern &&
 			compareSubscribeOptions(opts, existingSub.subscribeOptions) &&
 			compareTokens(existingSub.tokens, tokens) {
-			return existingSub, nil
+			resultSub = existingSub
+			return nil
 		}
-	}
 
-	var resultSub bus.Subscription
-	err = d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		// Soft delete any existing subscription (including expired ones)
 		// This preserves history and eliminates all conflict scenarios
-		_, err := tx.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`UPDATE gobus_subscriptions 
              SET deleted_at = NOW(), updated_at = NOW() 
              WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL`,
@@ -482,8 +485,24 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) error {
 		return err
 	}
 
-	// Deleting a subscription that does not exist succeeds.
-	_, err := d.unsubscribeInBatches(ctx, "queue = $1 AND pattern = $2", queue, pattern)
+	// First expire the subscription: a lookup in the database no longer
+	// matches it, Heartbeat cannot revive it, and a Subscribe replaces it
+	// rather than return it (the epoch, not NOW(): a Subscribe that waited
+	// for this row compares with its own, earlier NOW()). If the drain then
+	// fails, the subscription stays expired and calling Unsubscribe again
+	// finishes it. The metadata version is bumped once, by the soft delete.
+	var id int64
+	err := bussql.FromContext(ctx, d.db).QueryRowContext(ctx,
+		`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
+		 WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
+		 RETURNING id`, queue, pattern).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // deleting a subscription that does not exist succeeds
+	}
+	if err != nil {
+		return errors.Wrap(err, "failed to expire subscription")
+	}
+	_, err = d.unsubscribeInBatches(ctx, "id = $1", id)
 	return err
 }
 

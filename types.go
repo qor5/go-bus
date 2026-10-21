@@ -138,7 +138,8 @@ type Subscription interface {
 	// Unsubscribe removes this subscription.
 	// If autoDrain was enabled in the subscription options, pending jobs will be automatically cleaned up:
 	// they are deleted in batches, a transaction each, and the subscription is removed with the last one.
-	// If it fails midway, the subscription is still there with part of its jobs deleted; calling it again finishes.
+	// The subscription stops matching at once; if the drain fails midway, it stays, expired, with part of its jobs
+	// deleted, and calling Unsubscribe again finishes.
 	// Inside a transaction the context carries, every batch joins that transaction.
 	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
 	// This is because go-bus is designed to support offline messages.

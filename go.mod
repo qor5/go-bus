@@ -140,8 +140,9 @@ require (
 // v2.0.x of go-sqlite3 were tagged by accident (in 2020, bundling SQLite
 // 3.31.1) and are retracted, yet a requirement on one, from
 // github.com/qor5/x/v3 that this module's tests use, still selects it over
-// v1.14.x. Excluded here, the version this go.mod requires is v1.14.x, and so
-// is the one every module depending on this one gets.
+// v1.14.x. Excluded here, the version this go.mod requires is v1.14.x. A
+// module depending on this one gets v1.14.x too, unless it also requires a
+// github.com/qor5/x/v3 that still requires v2.0.3.
 exclude (
 	github.com/mattn/go-sqlite3 v2.0.0+incompatible
 	github.com/mattn/go-sqlite3 v2.0.1+incompatible

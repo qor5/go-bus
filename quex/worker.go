@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -44,6 +45,9 @@ type StartWorkerOptions struct {
 	Logger *slog.Logger
 
 	// ReconnectBackOff defines the backoff strategy for reconnection attempts.
+	// It is reset only when a worker that locked successfully fails, so it
+	// keeps growing while recreated workers cannot lock (the database is down),
+	// and a policy with a limit runs out over one such outage.
 	// If nil, DefaultReconnectBackOffFactory() will be used.
 	ReconnectBackOff backoff.BackOff
 
@@ -117,6 +121,14 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 		reconnectBackOff = DefaultReconnectBackOffFactory()
 	}
 
+	// Count successful Locks, to tell a database that is still down from one
+	// that came back (see the reconnect loop).
+	var tracked *lockTracker
+	if workerOptions.Mutex != nil {
+		tracked = &lockTracker{Mutex: workerOptions.Mutex}
+		workerOptions.Mutex = tracked
+	}
+
 	// Create initial worker
 	worker, err := que.NewWorker(workerOptions)
 	if err != nil {
@@ -164,6 +176,7 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 				return nil
 			}
 
+			tracked.locked.Store(false)
 			err := currentWorker.Run()
 			if errors.Is(err, que.ErrWorkerStoped) {
 				return nil
@@ -172,6 +185,13 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 
 			logger.WarnContext(workerCtx, "Worker error, will attempt to recreate", "error", err)
 
+			// A worker that locked before it failed reached the database: start
+			// the backoff over. One that never did (the database is still down,
+			// say) keeps it growing, so recreated workers do not dial it every
+			// second.
+			if tracked.locked.Load() {
+				reconnectBackOff.Reset()
+			}
 			nextBackOff := reconnectBackOff.NextBackOff()
 			if nextBackOff == backoff.Stop {
 				return errors.WithStack(ErrReconnectBackOffStopped)
@@ -198,8 +218,6 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 			workerMu.Unlock()
 
 			logger.InfoContext(workerCtx, "Worker successfully recreated")
-
-			reconnectBackOff.Reset()
 		}
 	}() // nolint:errcheck
 
@@ -257,4 +275,18 @@ func (c *workerController) Err() error {
 		return nil // Normal shutdown, not an error
 	}
 	return err
+}
+
+// lockTracker records whether a Lock of its mutex succeeded.
+type lockTracker struct {
+	que.Mutex
+	locked atomic.Bool
+}
+
+func (t *lockTracker) Lock(ctx context.Context, queue string, count int) ([]que.Job, error) {
+	jobs, err := t.Mutex.Lock(ctx, queue, count)
+	if err == nil {
+		t.locked.Store(true)
+	}
+	return jobs, err
 }

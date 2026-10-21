@@ -2569,3 +2569,43 @@ func TestAutoDrainOnUnsubscribe(t *testing.T) {
 		assert.Len(t, jobsAfter, 3, "Jobs should remain after unsubscribe when autoDrain is disabled")
 	})
 }
+
+// TestConsumeSurvivesADroppedConnection verifies that a consumer keeps
+// delivering after every database connection was cut (a restart or failover,
+// say): quex recreates the worker with the same go-que mutex, which must
+// connect again rather than fail for good.
+func TestConsumeSurvivesADroppedConnection(t *testing.T) {
+	b, queue, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+
+	_, err := queue.Subscribe(ctx, "drop.topic")
+	require.NoError(t, err)
+	got := make(chan string, 16)
+	consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+		got <- string(msg.Payload)
+		return msg.Destroy(ctx)
+	}, bus.WithWorkerConfig(&bus.WorkerConfig{MaxLockPerSecond: 50, MaxBufferJobsCount: 10, MaxPerformPerSecond: 100, MaxConcurrentPerformCount: 1}))
+	require.NoError(t, err)
+	defer func() { _ = consumer.Stop(context.Background()) }()
+
+	publish := func(payload string) error {
+		_, err := b.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "drop.topic", Payload: json.RawMessage(payload)}})
+		return err
+	}
+	require.NoError(t, publish(`"before"`))
+	select {
+	case <-got: // the consumer's mutex now holds a connection
+	case <-time.After(10 * time.Second):
+		t.Fatal("no message before the connections were cut")
+	}
+
+	_, err = db.ExecContext(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database()")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return publish(`"after"`) == nil }, 10*time.Second, 100*time.Millisecond)
+	select {
+	case m := <-got:
+		assert.Equal(t, `"after"`, m)
+	case <-time.After(30 * time.Second):
+		t.Fatal("no message after the connections were cut: the consumer is stuck")
+	}
+}

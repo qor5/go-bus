@@ -193,3 +193,31 @@ func TestStartWorker_BackOffStartsOverAfterAWorkerLocked(t *testing.T) {
 	next, reset := spy.counts()
 	require.GreaterOrEqual(t, reset, next, "each failure after a successful Lock starts the backoff over")
 }
+
+// lockOnceMutex locks fine once, then fails every Lock: the database was
+// reachable for the first worker only.
+type lockOnceMutex struct {
+	mu     sync.Mutex
+	locked bool
+}
+
+func (m *lockOnceMutex) Lock(_ context.Context, _ string, _ int) ([]que.Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.locked {
+		return nil, errors.New("simulated lock failure")
+	}
+	m.locked = true
+	return nil, nil
+}
+func (*lockOnceMutex) Unlock(_ context.Context, _ []int64) error { return nil }
+
+// TestStartWorker_OnlyAWorkerThatLockedStartsTheBackOffOver verifies that the
+// successful Lock is counted per worker: after the first worker locked and
+// failed, recreated workers that never lock keep the backoff growing.
+func TestStartWorker_OnlyAWorkerThatLockedStartsTheBackOffOver(t *testing.T) {
+	spy := startWithSpy(t, &lockOnceMutex{})
+	require.Eventually(t, func() bool { next, _ := spy.counts(); return next >= 5 }, 5*time.Second, time.Millisecond)
+	_, reset := spy.counts()
+	require.Equal(t, 1, reset, "only the worker that locked starts the backoff over")
+}

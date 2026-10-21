@@ -405,8 +405,8 @@ func (d *Dialect) Upsert(ctx context.Context, queue, pattern string, opts *bus.S
               token_0, token_1, token_2, token_3, token_4, token_5, token_6, token_7,
               token_8, token_9, token_10, token_11, token_12, token_13, token_14, token_15) 
              VALUES ($1, $2, $3, $4, NOW(), NOW(), 
-                     CASE WHEN $5 <= 0 THEN NULL 
-                          ELSE NOW() + ($5 * INTERVAL '1 microsecond') 
+                     CASE WHEN $5::bigint <= 0 THEN NULL 
+                          ELSE NOW() + ($5::bigint * INTERVAL '1 microsecond') 
                      END,
                      $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
             RETURNING id, queue, pattern, regex_pattern, options, created_at, updated_at, deleted_at,

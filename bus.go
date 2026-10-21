@@ -88,6 +88,41 @@ func (q *QueueImpl) StartConsumer(ctx context.Context, handler Handler, options 
 
 var _ Bus = (*BusImpl)(nil)
 
+// ExpiredUnsubscriber is a Bus that can unsubscribe, on their owners'
+// behalf, subscriptions whose TTL ran out (BusImpl is one). A Bus that wraps
+// another should implement it too, forwarding the call.
+type ExpiredUnsubscriber interface {
+	UnsubscribeExpired(ctx context.Context) (int, error)
+}
+
+var _ ExpiredUnsubscriber = (*BusImpl)(nil)
+
+// UnsubscribeExpiredLimit is the most subscriptions one
+// BusImpl.UnsubscribeExpired call handles. For another limit, call the
+// dialect's UnsubscribeExpired (ExpiredUnsubscriberDialect).
+const UnsubscribeExpiredLimit = 100
+
+// UnsubscribeExpired unsubscribes, on their owners' behalf, subscriptions
+// whose TTL ran out without a heartbeat, the owner crashed say: Publish no
+// longer matches them, and no heartbeat can revive them. Each is
+// unsubscribed as Unsubscribe would (soft-deleted, its pending jobs drained
+// if it was subscribed with WithAutoDrain; jobs being performed or already
+// retried are kept, as Drain keeps them). It handles at most
+// UnsubscribeExpiredLimit subscriptions a call, oldest first, so call it
+// periodically (from a heartbeat loop, say); nothing else removes expired
+// subscriptions. It returns how many it unsubscribed.
+//
+// Unlike the other methods it never joins a transaction ctx carries: it
+// commits as it goes (see the dialect for how). A dialect that cannot do this
+// makes it return ErrNotSupported.
+func (b *BusImpl) UnsubscribeExpired(ctx context.Context) (int, error) {
+	u, ok := b.dialect.(ExpiredUnsubscriberDialect)
+	if !ok {
+		return 0, errors.Wrap(ErrNotSupported, "dialect cannot unsubscribe expired subscriptions")
+	}
+	return u.UnsubscribeExpired(ctx, UnsubscribeExpiredLimit)
+}
+
 // BusImpl is a generic implementation of the Bus interface.
 type BusImpl struct {
 	dialect            Dialect

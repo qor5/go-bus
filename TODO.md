@@ -7,8 +7,7 @@ This document outlines the planned enhancements for the PubSub system.
 ### 1.1 Scheduled Cleanup Worker
 
 - Implement a background worker for periodic cleanup operations
-- Handle expired subscription soft deletion automatically
-- Perform AutoDrain operations for subscriptions with enabled autoDrain option
+- Done without a worker: `BusImpl.UnsubscribeExpired` (`ExpiredUnsubscriber`) soft-deletes expired subscriptions and drains those with autoDrain, a bounded batch a call, but the caller must call it periodically; a worker would call it on its own
 - Clean up orphaned jobs that fall outside subscription boundaries
 - Add configurable cleanup intervals and batch processing
 - Implement proper error handling and retry mechanisms for cleanup operations

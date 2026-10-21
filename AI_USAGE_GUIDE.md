@@ -147,6 +147,12 @@ go func() {
     defer ticker.Stop()
     for range ticker.C {
         sub.Heartbeat(ctx)
+        // Unsubscribe the subscriptions of instances that died without
+        // unsubscribing; nothing else removes expired subscriptions.
+        // (b is the bus.Bus from pgbus.New, named bus above.)
+        if u, ok := b.(bus.ExpiredUnsubscriber); ok {
+            u.UnsubscribeExpired(ctx)
+        }
     }
 }()
 
@@ -376,7 +382,7 @@ if err := reserveInventory(); err != nil {
 ### Subscribe Options
 
 - `bus.WithPlanConfig(config)` - Retry policy, delays, deduplication
-- `bus.WithTTL(duration)` - Auto-expire subscription
+- `bus.WithTTL(duration)` - Expire the subscription unless `Heartbeat()` renews it; an expired one stops matching, and is removed only by `UnsubscribeExpired`
 - `bus.WithAutoDrain(true)` - Auto-cleanup on unsubscribe
 
 ## Common Pitfalls
@@ -386,7 +392,7 @@ if err := reserveInventory(); err != nil {
 3. **Consumer lifecycle**: Call `consumer.Stop(ctx)` in cleanup
 4. **Bus lifecycle**: Always call `bus.Close()` to release cache resources
 5. **Ephemeral queues**: Use `WithAutoDrain(true)` and call `Unsubscribe()`
-6. **TTL subscriptions**: Call `Heartbeat()` periodically
+6. **TTL subscriptions**: Call `Heartbeat()` periodically, and `UnsubscribeExpired()` (through `bus.ExpiredUnsubscriber`) periodically from live instances to remove the subscriptions of dead ones
 7. **Subject validation**: Only lowercase, no wildcards in subjects (patterns can have wildcards)
 
 ## Dependencies

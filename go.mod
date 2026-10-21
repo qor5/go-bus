@@ -7,7 +7,7 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.3.0
 	github.com/mattn/go-sqlite3 v2.0.3+incompatible
 	github.com/pkg/errors v0.9.1
-	github.com/qor5/go-que v1.1.3-0.20261021170919-1cf8d47ce1cd
+	github.com/qor5/go-que v1.1.3-0.20261021175641-4ce8264f2615
 	github.com/qor5/x/v3 v3.2.1-0.20260602032452-ea2dcdcd625e
 	github.com/rs/xid v1.6.0
 	github.com/stretchr/testify v1.11.1

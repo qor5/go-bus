@@ -21,4 +21,7 @@ var (
 
 	// ErrOverlappingPatterns is returned when a queue has multiple patterns matching the same subject.
 	ErrOverlappingPatterns = errors.New("queue has overlapping patterns which may cause unexpected behavior; only the first subscription will be triggered")
+
+	// ErrNotSupported is returned when the dialect cannot do what was asked.
+	ErrNotSupported = errors.New("not supported by the dialect")
 )

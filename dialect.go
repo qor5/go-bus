@@ -17,16 +17,18 @@ type (
 	}
 )
 
-// Dialect defines the interface for database-specific implementations of the message bus.
-// It abstracts storage operations and allows for different backend databases to be used.
-// ExpiredUnsubscriber is implemented by a Dialect that can unsubscribe
-// expired subscriptions on their owners' behalf (see BusImpl.UnsubscribeExpired).
-type ExpiredUnsubscriber interface {
+// ExpiredUnsubscriberDialect is implemented by a Dialect that can
+// unsubscribe expired subscriptions on their owners' behalf (see
+// BusImpl.UnsubscribeExpired). A DialectDecorator that wraps such a dialect
+// should implement it too, forwarding the call.
+type ExpiredUnsubscriberDialect interface {
 	// UnsubscribeExpired unsubscribes up to limit subscriptions whose TTL ran
 	// out, oldest first, as Unsubscribe would, and returns how many.
 	UnsubscribeExpired(ctx context.Context, limit int) (int, error)
 }
 
+// Dialect defines the interface for database-specific implementations of the message bus.
+// It abstracts storage operations and allows for different backend databases to be used.
 type Dialect interface {
 	// Migrate performs database migrations to initialize required tables.
 	Migrate(ctx context.Context) error

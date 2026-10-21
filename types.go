@@ -136,7 +136,11 @@ type Subscription interface {
 	PlanConfig() *PlanConfig
 
 	// Unsubscribe removes this subscription.
-	// If autoDrain was enabled in the subscription options, pending jobs will be automatically cleaned up.
+	// If autoDrain was enabled in the subscription options, pending jobs will be automatically cleaned up:
+	// they are deleted in batches, a transaction each, and the subscription is removed with the last one.
+	// The subscription stops matching at once; if the drain fails midway, it stays, expired, with part of its jobs
+	// deleted, and calling Unsubscribe again finishes.
+	// Inside a transaction the context carries, every batch joins that transaction.
 	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
 	// This is because go-bus is designed to support offline messages.
 	Unsubscribe(ctx context.Context) error
@@ -151,6 +155,8 @@ type Subscription interface {
 
 	// Drain removes all pending jobs that are not currently being processed.
 	// This method is useful for cleaning up the queue without affecting jobs that are already running.
+	// Jobs are deleted in batches, a transaction each, so a failure leaves the batches before it deleted;
+	// inside a transaction the context carries, every batch joins that transaction.
 	// Returns the number of jobs that were deleted.
 	Drain(ctx context.Context) (int, error)
 }

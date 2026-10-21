@@ -236,8 +236,8 @@ github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55/go.mod h1:Om
 github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
 github.com/qor5/confx v0.0.0-20250426065316-0d28db5b4d54 h1:sO/saPkFgwfLaiCVTg+e9x6lAYBrqY91h1REu4NLMm0=
 github.com/qor5/confx v0.0.0-20250426065316-0d28db5b4d54/go.mod h1:03dPo1SHYn9sU57mH67Y1p9FIcglWaHr4i/xkeYmX4o=
-github.com/qor5/go-que v1.1.3-0.20261014191037-b635c33e212d h1:hwvFacj4HVjnBRv4ylC0wYW5mpqfYeR7A1BhsqpNbf0=
-github.com/qor5/go-que v1.1.3-0.20261014191037-b635c33e212d/go.mod h1:ZpqraU/ecYKfr7xgHpSK3gY1d1zVstMLEc+z2t/imDw=
+github.com/qor5/go-que v1.1.3-0.20261021170919-1cf8d47ce1cd h1:mKSruRivBkRNBYKp6qW2/ewwMDpFmspzGyDw4gUXicg=
+github.com/qor5/go-que v1.1.3-0.20261021170919-1cf8d47ce1cd/go.mod h1:ZpqraU/ecYKfr7xgHpSK3gY1d1zVstMLEc+z2t/imDw=
 github.com/qor5/x/v3 v3.2.1-0.20260602032452-ea2dcdcd625e h1:FfNoOxdlVt1L0MKYfbwGIyByS7HZgOWsxPOsNUveBoM=
 github.com/qor5/x/v3 v3.2.1-0.20260602032452-ea2dcdcd625e/go.mod h1:aw3fBGpEbyrEoGLOtQdBTUAKNJ7i0RE1exHjHJSlPbs=
 github.com/redis/go-redis/v9 v9.16.0 h1:OotgqgLSRCmzfqChbQyG1PHC3tLNR89DG4jdOERSEP4=

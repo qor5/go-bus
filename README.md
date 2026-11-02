@@ -253,6 +253,16 @@ This pattern is particularly useful for:
 
 Each instance creates a queue with a unique name, so each message is processed independently by each subscribed instance, achieving a true broadcast effect.
 
+An instance that dies without unsubscribing (killed, out of memory) leaves its subscription behind, and every broadcast keeps adding jobs to its queue. To clean up after such instances, subscribe with `bus.WithTTL(ttl)`, call `sub.Heartbeat(ctx)` well within the TTL, and have the live instances call `UnsubscribeExpired` periodically (every heartbeat, say). It unsubscribes, as `Unsubscribe` would, up to 100 subscriptions a call whose TTL ran out, draining those with `WithAutoDrain(true)`; nothing else removes expired subscriptions. `pgbus.New` returns a `bus.Bus`, so reach it through `bus.ExpiredUnsubscriber`:
+
+```go
+if u, ok := b.(bus.ExpiredUnsubscriber); ok {
+    if _, err := u.UnsubscribeExpired(ctx); err != nil {
+        log.Printf("Failed to unsubscribe expired subscriptions: %v", err)
+    }
+}
+```
+
 ## Topic Pattern Explanation
 
 go-bus supports three types of topic matching patterns, following the NATS messaging system style:

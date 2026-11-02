@@ -115,6 +115,16 @@ func CacheDecorator(cache Cache) DialectDecorator {
 	}
 }
 
+// UnsubscribeExpired forwards to the decorated dialect; the subscriptions it
+// removes bump the metadata version, which clears the cache.
+func (c *cacheDialect) UnsubscribeExpired(ctx context.Context, limit int) (int, error) {
+	u, ok := c.Dialect.(ExpiredUnsubscriberDialect)
+	if !ok {
+		return 0, errors.Wrap(ErrNotSupported, "dialect cannot unsubscribe expired subscriptions")
+	}
+	return u.UnsubscribeExpired(ctx, limit)
+}
+
 // cacheDialect caches subscription lookups by subject
 type cacheDialect struct {
 	Dialect

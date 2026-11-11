@@ -272,6 +272,7 @@ type freshCall struct {
 	done     chan struct{}
 	val      any
 	err      error
+	cut      bool // it was ended before it returned: its callers left or a deadline passed
 }
 
 // wait counts one more caller waiting for the call and moves the call's
@@ -299,6 +300,20 @@ func newFreshCall(ctx context.Context, fn func(context.Context) (any, error)) *f
 }
 
 func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Context) (any, error)) (any, error) {
+	for {
+		val, err, cut := f.wait(ctx, key, fn)
+		// a call another caller's deadline ended says nothing about this
+		// caller, whose ctx is fine: it shares a new call instead
+		if err != nil && cut && ctx.Err() == nil {
+			continue
+		}
+		return val, err
+	}
+}
+
+// wait shares one call of fn for key and returns its result and whether it
+// was cut short.
+func (f *freshFlights) wait(ctx context.Context, key string, fn func(context.Context) (any, error)) (any, error, bool) {
 	f.mu.Lock()
 	if f.running == nil {
 		f.running = map[string]*freshCall{}
@@ -310,6 +325,7 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Conte
 		// callers get that error, and a caller arriving now gets a new call
 		delete(f.next, key)
 		call.err = call.ctx.Err()
+		call.cut = true
 		close(call.done)
 		call = nil
 	}
@@ -339,14 +355,15 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Conte
 			call.cancel()
 		}
 		f.mu.Unlock()
-		return nil, ctx.Err()
+		return nil, ctx.Err(), false
 	case <-call.done:
-		return call.val, call.err
+		return call.val, call.err, call.cut
 	}
 }
 
 func (f *freshFlights) run(key string, call *freshCall) {
 	call.val, call.err = call.fn(call.ctx)
+	call.cut = call.ctx.Err() != nil
 	call.cancel()
 	close(call.done)
 

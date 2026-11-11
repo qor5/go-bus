@@ -435,3 +435,47 @@ func TestConcurrentDrainsLeaveNoJobWhenOneGivesUp(t *testing.T) {
 	assert.Empty(t, mustSubscriptions(t, q))
 	assert.Equal(t, 0, queueJobs(t, "twice"), "the jobs the first drain rolled back are drained")
 }
+
+// A Subscribe with the same options, in a transaction that began before an
+// auto-drain Unsubscribe and queued behind it on the row, makes a new
+// subscription rather than hand back the one being removed: the Unsubscribe
+// expires it to the epoch, not to its own NOW(), which is later than the
+// Subscribe's transaction's.
+func TestSubscribeInAnOlderTransactionQueuedBehindAnUnsubscribe(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("epoch")
+	subscribe := func(ctx context.Context) (bus.Subscription, error) {
+		return q.Subscribe(ctx, "epoch.topic", bus.WithAutoDrain(true))
+	}
+	sub, err := subscribe(ctx)
+	require.NoError(t, err)
+	publishMany(t, b, "epoch.topic", 5)
+
+	older, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = older.Rollback() }()
+	_, err = older.Exec(`SELECT 1`) // its NOW() is fixed from here
+	require.NoError(t, err)
+	time.Sleep(50 * time.Millisecond)
+
+	holder, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = holder.Rollback() }()
+	_, err = holder.Exec(`SELECT id FROM gobus_subscriptions WHERE queue = 'epoch' AND deleted_at IS NULL FOR UPDATE`)
+	require.NoError(t, err)
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	subscribed := make(chan error, 1)
+	go func() { _, err := subscribe(bussql.NewContext(ctx, older)); subscribed <- err }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, holder.Commit())
+	require.NoError(t, <-subscribed)
+	require.NoError(t, older.Commit())
+	require.NoError(t, <-unsubscribed)
+
+	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe leaves a live subscription")
+}

@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,7 +61,8 @@ func TestFreshFlightsSharedCallOutlivesTheCallerThatStartedIt(t *testing.T) {
 // A shared call ends at the latest deadline of the callers waiting for it: a
 // caller without a deadline does not keep a call that hangs (a dead
 // connection) running past every deadline, as it did not when the call ran on
-// the starting caller's ctx.
+// the starting caller's ctx. That caller then runs the call again (on another
+// connection, in a database), rather than fail with the others' deadline.
 func TestFreshFlightsEndsAtTheLatestDeadline(t *testing.T) {
 	var f freshFlights
 	release := make(chan struct{})
@@ -75,28 +77,42 @@ func TestFreshFlightsEndsAtTheLatestDeadline(t *testing.T) {
 	<-running
 
 	ended := make(chan error, 1)
-	hang := func(ctx context.Context) (any, error) {
-		<-ctx.Done()
-		ended <- ctx.Err()
-		return nil, ctx.Err()
+	var calls atomic.Int32
+	hangOnce := func(ctx context.Context) (any, error) {
+		if calls.Add(1) == 1 {
+			<-ctx.Done()
+			ended <- ctx.Err()
+			return nil, ctx.Err()
+		}
+		return "again", nil
 	}
 	// both wait for the next call; it hangs once it starts
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	go func() { _, _ = f.do(ctx, "k", hang) }()
+	go func() { _, _ = f.do(ctx, "k", hangOnce) }()
 	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
-	joined := make(chan error, 1)
-	go func() { _, err := f.do(context.Background(), "k", hang); joined <- err }()
+	type result struct {
+		v   any
+		err error
+	}
+	joined := make(chan result, 1)
+	go func() { v, err := f.do(context.Background(), "k", hangOnce); joined <- result{v, err} }()
 	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 3 }, time.Second, time.Millisecond)
 	close(release)
 
 	select {
-	case err := <-joined:
+	case err := <-ended:
 		require.Error(t, err)
 	case <-time.After(3 * time.Second):
-		t.Fatal("a caller without a deadline still waits for a call past every deadline")
+		t.Fatal("a call ran past every deadline because one caller has none")
 	}
-	require.Error(t, <-ended)
+	select {
+	case r := <-joined:
+		require.NoError(t, r.err)
+		assert.Equal(t, "again", r.v)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the caller without a deadline got no result")
+	}
 }
 
 // A waiting call whose deadline passed before it started is not shared with a
@@ -194,4 +210,51 @@ func TestFreshFlightsRunsUntilTheLatestDeadline(t *testing.T) {
 	r := <-got
 	require.NoError(t, r.err, "the call ended at the earliest deadline, not the latest")
 	assert.Equal(t, "done", r.v)
+}
+
+// A caller whose shared call another caller's deadline ended, while its own
+// ctx is fine, gets the result of a call it runs again, not that deadline.
+func TestFreshFlightsRunsAgainForACallerAnotherDeadlineFailed(t *testing.T) {
+	var f freshFlights
+	release := make(chan struct{})
+	running := make(chan struct{})
+	go func() {
+		_, _ = f.do(context.Background(), "k", func(context.Context) (any, error) {
+			close(running)
+			<-release
+			return "first", nil
+		})
+	}()
+	<-running
+
+	var calls atomic.Int32
+	fn := func(ctx context.Context) (any, error) {
+		if calls.Add(1) == 1 { // hangs until a deadline ends it
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return "ok", nil
+	}
+	type result struct {
+		v   any
+		err error
+	}
+	got := make(chan result, 1)
+	go func() { v, err := f.do(context.Background(), "k", fn); got <- result{v, err} }()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	timedOut := make(chan error, 1)
+	go func() { _, err := f.do(ctx, "k", fn); timedOut <- err }()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 3 }, time.Second, time.Millisecond)
+	close(release)
+
+	require.ErrorIs(t, <-timedOut, context.DeadlineExceeded)
+	select {
+	case r := <-got:
+		require.NoError(t, r.err, "a caller without a deadline got another caller's")
+		assert.Equal(t, "ok", r.v)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the caller got no result")
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/qor5/go-bus"
+	"github.com/qor5/go-bus/bussql"
 	"github.com/qor5/go-bus/pgbus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -245,4 +246,113 @@ func TestALookupCachedAfterTheVersionChangedIsNotServed(t *testing.T) {
 		}
 		assert.ElementsMatch(t, []string{"old", "new"}, queues, "publish #%d after the Subscribe", i)
 	}
+}
+
+// A lookup shared among callers does not run on an executor other than a
+// transaction that one of them carries (a *sql.Conn, say): the others would
+// use a connection that is not theirs, and fail with it. Here the connection
+// is closed; the lookup runs on the bus's own database.
+func TestCachedLookupIgnoresAConnectionTheCallerCarries(t *testing.T) {
+	cleanupAllTables()
+	ctx := context.Background()
+	b, err := pgbus.New(db)
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+	_, err = b.Queue("conn").Subscribe(ctx, "conn.topic")
+	require.NoError(t, err)
+
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	subs, err := b.BySubject(bussql.NewContext(ctx, conn), "conn.topic")
+	require.NoError(t, err)
+	assert.Len(t, subs, 1)
+}
+
+// countingCache counts the hits and sets of a cache.
+type countingCache struct {
+	bus.Cache
+	mu         sync.Mutex
+	hits, sets int
+}
+
+func (c *countingCache) Get(key string) ([]bus.Subscription, bool) {
+	v, ok := c.Cache.Get(key)
+	if ok {
+		c.mu.Lock()
+		c.hits++
+		c.mu.Unlock()
+	}
+	return v, ok
+}
+
+func (c *countingCache) Set(key string, v []bus.Subscription) {
+	c.mu.Lock()
+	c.sets++
+	c.mu.Unlock()
+	c.Cache.Set(key, v)
+}
+
+// Publishes each in a transaction of their own, as with an outbox, are
+// served by the cache once it knows the version, as publishes outside one.
+func TestCachedPublishesInTransactionsUseTheCache(t *testing.T) {
+	cleanupAllTables()
+	ctx := context.Background()
+	rc, err := bus.NewRistrettoCache(nil)
+	require.NoError(t, err)
+	defer rc.Close()
+	cache := &countingCache{Cache: bus.WrapRistrettoCache(rc)}
+	b, err := pgbus.New(db, bus.WithMigrate(false), bus.WithCache(cache))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+	_, err = b.Queue("outbox").Subscribe(ctx, "outbox.topic")
+	require.NoError(t, err)
+
+	for range 200 {
+		tx, err := db.Begin()
+		require.NoError(t, err)
+		_, err = b.Publish(bussql.NewContext(ctx, tx), &bus.Outbound{Message: bus.Message{Subject: "outbox.topic", Payload: []byte(`"m"`)}})
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit())
+		time.Sleep(time.Millisecond) // ristretto sets land asynchronously
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	t.Logf("hits %d, sets %d", cache.hits, cache.sets)
+	assert.GreaterOrEqual(t, cache.hits, 150, "publishes in transactions missed the cache")
+}
+
+// A publish never delivers to a subscription a transaction made and rolled
+// back, though a publish in that transaction saw it: what the transaction
+// read is not cached (its version is not one read outside it), and an entry
+// under that version would be cleared anyway when another change commits it.
+func TestCachedPublishDoesNotKeepARolledBackSubscription(t *testing.T) {
+	cleanupAllTables()
+	ctx := context.Background()
+	b, err := pgbus.New(db, bus.WithMigrate(false))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+	publish := func(ctx context.Context) {
+		_, err := b.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "rb.topic", Payload: []byte(`"m"`)}})
+		require.NoError(t, err)
+	}
+	_, err = b.Queue("rb-kept").Subscribe(ctx, "rb.topic")
+	require.NoError(t, err)
+	publish(ctx) // the cache knows the version
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	_, err = b.Queue("rb-gone").Subscribe(bussql.NewContext(ctx, tx), "rb.topic")
+	require.NoError(t, err)
+	publish(bussql.NewContext(ctx, tx))
+	require.NoError(t, tx.Rollback())
+
+	// another change commits the version the transaction had read
+	_, err = b.Queue("rb-other").Subscribe(ctx, "rb.other")
+	require.NoError(t, err)
+	publish(ctx)
+
+	var gone int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM goque_jobs WHERE queue = 'rb-gone'`).Scan(&gone))
+	assert.Zero(t, gone, "a publish delivered to a subscription that was rolled back")
 }

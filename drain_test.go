@@ -272,3 +272,57 @@ func TestSubscribeWaitsForAnUnsubscribeThatCameFirst(t *testing.T) {
 
 	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe wins")
 }
+
+// drainChasing drains (or unsubscribes with auto-drain) a 2,500-job queue,
+// holding it on its second batch while one more message is published, and
+// returns whether that message survived.
+func drainChasing(t *testing.T, queue string, run func(ctx context.Context, sub bus.Subscription) error, opts ...bus.SubscribeOption) bool {
+	t.Helper()
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue(queue)
+	subject := queue + ".topic"
+	sub, err := q.Subscribe(ctx, subject, opts...)
+	require.NoError(t, err)
+	publishMany(t, b, subject, 2500)
+	blocker := holdJob(t, queue, 1999) // a job of the second batch
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, sub) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+
+	// a message delivered meanwhile: a copy of a pending job, as a publisher
+	// whose cached subscriptions still match would add (a Subscribe here
+	// would wait for the unsubscribe's batch)
+	var newID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO goque_jobs (queue, args, run_at, retry_policy)
+		SELECT queue, args, now(), retry_policy FROM goque_jobs WHERE queue = $1 ORDER BY id LIMIT 1
+		RETURNING id`, queue).Scan(&newID))
+	require.NoError(t, blocker.Rollback())
+	require.NoError(t, <-done)
+
+	var exists bool
+	require.NoError(t, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM goque_jobs WHERE id = $1)`, newID).Scan(&exists))
+	return exists
+}
+
+// Drain deletes the jobs pending when it is called, not ones published while
+// it runs: those are new messages, which a drain that walked on to the end of
+// the queue would lose (and, published fast enough, would never let it end).
+func TestDrainLeavesJobsPublishedWhileItRuns(t *testing.T) {
+	survived := drainChasing(t, "chase_drain", func(ctx context.Context, sub bus.Subscription) error {
+		_, err := sub.Drain(ctx)
+		return err
+	})
+	assert.True(t, survived, "a message published while Drain ran was deleted")
+}
+
+// The same for the drain of Unsubscribe with auto-drain.
+func TestUnsubscribeLeavesJobsPublishedWhileItDrains(t *testing.T) {
+	survived := drainChasing(t, "chase_unsub", func(ctx context.Context, sub bus.Subscription) error {
+		return sub.Unsubscribe(ctx)
+	}, bus.WithAutoDrain(true))
+	assert.True(t, survived, "a message published while Unsubscribe drained was deleted")
+}

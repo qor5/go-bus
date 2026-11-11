@@ -559,11 +559,17 @@ func (d *Dialect) drain(ctx context.Context, queue, pattern string) (int, error)
 
 	total := 0
 	var after int64
+	upTo := int64(-1) // read in the first batch's transaction
 	for {
 		var picked, deleted int
 		err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 			var err error
-			picked, deleted, after, err = d.drainBatchInTx(ctx, tx, queue, pattern, after)
+			if upTo < 0 {
+				if upTo, err = lastJobIDInTx(ctx, tx); err != nil {
+					return err
+				}
+			}
+			picked, deleted, after, err = d.drainBatchInTx(ctx, tx, queue, pattern, after, upTo)
 			return err
 		})
 		if err != nil {
@@ -639,19 +645,31 @@ func (s *subscription) Drain(ctx context.Context) (int, error) {
 	return s.d.drain(ctx, s.queue, s.pattern)
 }
 
+// lastJobIDInTx returns the highest job id, the bound a drain stops at: it
+// deletes the jobs pending when it started, not messages published while it
+// runs, which a drain walking on to the end of the queue would lose (and,
+// with a steady stream of them, never finish).
+func lastJobIDInTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var id int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM goque_jobs`).Scan(&id); err != nil {
+		return 0, errors.Wrap(err, "failed to read the last job id")
+	}
+	return id, nil
+}
+
 // drainBatch bounds the jobs one drain statement deletes, and so the advisory
 // locks one transaction takes: draining a long queue in one statement can run
 // out of lock table memory.
 const drainBatch = 1000
 
 // drainBatchInTx deletes up to drainBatch pending jobs of queue and pattern
-// with ids above after, in id order. It returns how many jobs it looked at,
+// with ids above after and at most upTo, in id order. It returns how many jobs it looked at,
 // how many it deleted and the last id it looked at. It skips a job being
 // performed (its advisory lock is held) and a job already retried. The
 // advisory lock is taken only on the jobs of the batch, and the job conditions
 // are repeated on the DELETE, which is all PostgreSQL rechecks on a row a
 // worker changed after the batch was read.
-func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern string, after int64) (picked, deleted int, last int64, err error) {
+func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern string, after, upTo int64) (picked, deleted int, last int64, err error) {
 	var lastID sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
 		WITH batch AS (
@@ -659,7 +677,7 @@ func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern
 			WHERE queue = $1
 			  AND args::jsonb->0->'header'->'`+bus.HeaderSubscriptionPattern+`'->>0 = $2
 			  AND done_at IS NULL AND expired_at IS NULL AND retry_count = 0
-			  AND id > $3
+			  AND id > $3 AND id <= $5
 			ORDER BY id
 			LIMIT $4
 		), locked AS (
@@ -671,7 +689,7 @@ func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern
 			RETURNING id
 		)
 		SELECT (SELECT COUNT(*) FROM batch), (SELECT COUNT(*) FROM deleted), (SELECT MAX(id) FROM batch)`,
-		queue, pattern, after, drainBatch).Scan(&picked, &deleted, &lastID)
+		queue, pattern, after, drainBatch, upTo).Scan(&picked, &deleted, &lastID)
 	if err != nil {
 		return 0, 0, 0, errors.Wrap(err, "failed to drain subscription jobs")
 	}
@@ -693,6 +711,7 @@ func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern
 // call.
 func (d *Dialect) unsubscribeInBatches(ctx context.Context, cond string, args ...any) (bool, error) {
 	var after int64
+	upTo := int64(-1) // read in the first batch's transaction, see lastJobIDInTx
 	for {
 		var done, more bool
 		err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -711,7 +730,12 @@ func (d *Dialect) unsubscribeInBatches(ctx context.Context, cond string, args ..
 			}
 			var options bus.SubscribeOptions
 			if json.Unmarshal(optionsData, &options) == nil && options.AutoDrain {
-				picked, _, last, err := d.drainBatchInTx(ctx, tx, queue, pattern, after)
+				if upTo < 0 {
+					if upTo, err = lastJobIDInTx(ctx, tx); err != nil {
+						return err
+					}
+				}
+				picked, _, last, err := d.drainBatchInTx(ctx, tx, queue, pattern, after, upTo)
 				if err != nil {
 					return err
 				}

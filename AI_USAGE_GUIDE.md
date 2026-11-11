@@ -146,9 +146,41 @@ go func() {
     ticker := time.NewTicker(1 * time.Minute)
     defer ticker.Stop()
     for range ticker.C {
-        sub.Heartbeat(ctx)
+        err := sub.Heartbeat(ctx)
+        if errors.Is(err, bus.ErrSubscriptionNotFound) {
+            // it expired (a heartbeat came too late): subscribe again, or this
+            // instance receives nothing more; sub then heartbeats and
+            // unsubscribes the new one (same queue and pattern)
+            _, err = podQueue.Subscribe(ctx, "cache.invalidate.>",
+                bus.WithTTL(5*time.Minute),
+                bus.WithAutoDrain(true))
+        }
+        if err != nil {
+            log.Printf("heartbeat: %v", err)
+        }
     }
 }()
+
+// Unsubscribe the subscriptions of instances that died without unsubscribing
+// (expired for another TTL); nothing else removes them. In a goroutine of its
+// own, with a timeout: draining a long queue takes a while, and must not hold
+// up the heartbeat. (bus.ExpiredUnsubscriber, spelled out: the variable bus
+// hides the package.)
+if u, ok := bus.(interface {
+    UnsubscribeExpired(context.Context) (int, error)
+}); ok {
+    go func() {
+        ticker := time.NewTicker(1 * time.Minute)
+        defer ticker.Stop()
+        for range ticker.C {
+            cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+            if _, err := u.UnsubscribeExpired(cctx); err != nil {
+                log.Printf("unsubscribe expired: %v", err)
+            }
+            cancel()
+        }
+    }()
+}
 
 consumer, _ := podQueue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
     // All instances receive and process this
@@ -376,7 +408,7 @@ if err := reserveInventory(); err != nil {
 ### Subscribe Options
 
 - `bus.WithPlanConfig(config)` - Retry policy, delays, deduplication
-- `bus.WithTTL(duration)` - Auto-expire subscription
+- `bus.WithTTL(duration)` - Expire the subscription unless `Heartbeat()` renews it; an expired one stops matching, and is removed only by `UnsubscribeExpired`, once expired for another TTL
 - `bus.WithAutoDrain(true)` - Auto-cleanup on unsubscribe
 
 ## Common Pitfalls
@@ -386,7 +418,7 @@ if err := reserveInventory(); err != nil {
 3. **Consumer lifecycle**: Call `consumer.Stop(ctx)` in cleanup
 4. **Bus lifecycle**: Always call `bus.Close()` to release cache resources
 5. **Ephemeral queues**: Use `WithAutoDrain(true)` and call `Unsubscribe()`
-6. **TTL subscriptions**: Call `Heartbeat()` periodically
+6. **TTL subscriptions**: Call `Heartbeat()` periodically and handle its error (`ErrSubscriptionNotFound`: subscribe again), and call `UnsubscribeExpired()` (through `bus.ExpiredUnsubscriber`) periodically from live instances, in a goroutine of its own with a timeout, to remove the subscriptions of dead ones
 7. **Subject validation**: Only lowercase, no wildcards in subjects (patterns can have wildcards)
 
 ## Dependencies

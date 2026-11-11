@@ -89,6 +89,122 @@ func (d *Dialect) Migrate(ctx context.Context) error {
 	return Migrate(ctx, d.db)
 }
 
+var _ bus.ExpiredUnsubscriberDialect = (*Dialect)(nil)
+
+// expiredForATTL holds for a subscription that expired at least its TTL ago
+// (options.ttl is in nanoseconds, as Heartbeat reads it), or that was
+// expired to the epoch, which marks it abandoned (an Unsubscribe, or a call
+// of this, cut short) whatever its TTL.
+const expiredForATTL = `(expires_at = 'epoch' OR expires_at <= NOW() - (COALESCE((options->>'ttl')::bigint, 0) / 1000) * INTERVAL '1 microsecond')`
+
+// UnsubscribeExpired unsubscribes up to limit subscriptions whose TTL ran out
+// (by the database's clock), oldest first, and returns how many. Each is
+// unsubscribed as by unsubscribeInBatches: drained, if it asked for
+// auto-drain, in batches of drainBatch jobs, each committed on its own, and
+// soft-deleted with the last one. It never joins a transaction ctx carries,
+// which would hold every batch's locks until the caller commits. It stops at
+// the first error; the next call resumes, oldest first.
+//
+// A subscription counts as abandoned once it has been expired for another
+// TTL (expiredForATTL): an owner late with a Heartbeat (a pause, a slow
+// database) gets that long to subscribe again and keep its pending jobs.
+// One that Unsubscribe expired (to the epoch) and did not finish counts at
+// once.
+//
+// Publish no longer matches an expired subscription, but a publish whose
+// transaction read the subscriptions before it expired can still add a job
+// after the drain went past; such a job stays, as after Unsubscribe.
+func (d *Dialect) UnsubscribeExpired(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	ctx = bussql.NewContext(ctx, d.db)
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT id FROM gobus_subscriptions
+         WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW() AND `+expiredForATTL+`
+         ORDER BY expires_at, id
+         LIMIT $1`, limit)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to find expired subscriptions")
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, errors.Wrap(err, "failed to scan expired subscription")
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, errors.Wrap(err, "failed to find expired subscriptions")
+	}
+
+	n := 0
+	for _, id := range ids {
+		done, err := d.unsubscribeExpired(ctx, id)
+		if err != nil {
+			return n, err
+		}
+		if done {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// unsubscribeExpired unsubscribes subscription id if it is still there and
+// expired, and reports whether it did. By id: an expired subscription cannot
+// be revived, and one made since for the same queue and pattern is a new row.
+// Its row is updated (locked) while the drain's bound is read, so a
+// Subscribe that replaces it commits after that, and its jobs are above the
+// bound (see unsubscribeInBatches).
+func (d *Dialect) unsubscribeExpired(ctx context.Context, id int64) (bool, error) {
+	var queue, pattern string
+	var autoDrain, done bool
+	var upTo int64
+	err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Expired to the epoch, as Unsubscribe does, rather than only
+		// locked: a Heartbeat whose transaction began before the
+		// subscription expired would otherwise still renew it after this
+		// commits, and the subscription be deleted with the Heartbeat
+		// reported as a success. The epoch keeps it first in line, so a
+		// call that is cut short is resumed by the next one.
+		var optionsData []byte
+		err := tx.QueryRowContext(ctx,
+			`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
+			 WHERE id = $1 AND deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW() AND `+expiredForATTL+`
+			 RETURNING queue, pattern, options`, id).Scan(&queue, &pattern, &optionsData)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // unsubscribed or replaced meanwhile
+		}
+		if err != nil {
+			return errors.Wrap(err, "failed to lock subscription")
+		}
+		var options bus.SubscribeOptions
+		autoDrain = json.Unmarshal(optionsData, &options) == nil && options.AutoDrain
+		if autoDrain {
+			if upTo, err = lastJobIDInTx(ctx, tx); err != nil {
+				return err
+			}
+			// as Unsubscribe does: publishers' cached lookups stop
+			// matching it before the drain, whatever their clocks
+			return d.updateMetadata(ctx, tx)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE gobus_subscriptions SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1`, id); err != nil {
+			return errors.Wrap(err, "failed to soft delete subscription")
+		}
+		done = true
+		return d.updateMetadata(ctx, tx)
+	})
+	if err != nil || !autoDrain {
+		return done, err
+	}
+	return d.unsubscribeInBatches(ctx, id, queue, pattern, upTo)
+}
+
 // scanSubscriptions scans rows and converts them to subscription objects
 func (d *Dialect) scanSubscriptions(rows *sql.Rows) ([]bus.Subscription, error) {
 	var subscriptions []bus.Subscription

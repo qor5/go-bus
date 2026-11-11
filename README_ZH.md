@@ -250,6 +250,22 @@ defer func() {
 
 每个实例创建的队列名都是唯一的，因此每条消息会被每个订阅的实例独立处理一次，实现真正的广播效果。
 
+实例没来得及退订就死掉（被杀、内存耗尽）时，它的订阅会留下来，之后每次广播都继续往它的队列里加任务。要清理这样的订阅：订阅时加 `bus.WithTTL(ttl)`，在 TTL 之内足够早地调用 `sub.Heartbeat(ctx)`，并让活着的实例定期调用 `UnsubscribeExpired`。它每次最多处理 100 个「过期之后又过了至少一个 TTL」的订阅（心跳只是晚了一点的实例不会被清掉，任务也保得住），像 `Unsubscribe` 一样退订，带 `WithAutoDrain(true)` 的会清空待处理任务；没有别的机制会删除过期的订阅。清空一个很长的队列可能要一阵子，所以要在单独的 goroutine 里调用，不要放在心跳循环里，并且带上超时；被超时打断的，下一次调用会接着做完。另外不要忽略心跳的错误：返回 `ErrSubscriptionNotFound` 说明订阅已经过期，这个实例要重新订阅。`pgbus.New` 返回的是 `bus.Bus`，所以通过 `bus.ExpiredUnsubscriber` 调用：
+
+```go
+if u, ok := b.(bus.ExpiredUnsubscriber); ok {
+    go func() {
+        for range time.Tick(time.Minute) {
+            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+            if _, err := u.UnsubscribeExpired(ctx); err != nil {
+                log.Printf("清理过期订阅失败: %v", err)
+            }
+            cancel()
+        }
+    }()
+}
+```
+
 ## 主题模式说明
 
 go-bus 支持三种主题匹配模式，遵循 NATS 消息系统的风格：

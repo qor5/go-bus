@@ -104,13 +104,19 @@ const UnsubscribeExpiredLimit = 100
 
 // UnsubscribeExpired unsubscribes, on their owners' behalf, subscriptions
 // whose TTL ran out without a heartbeat, the owner crashed say: Publish no
-// longer matches them, and no heartbeat can revive them. Each is
+// longer matches them, and no heartbeat can revive them. It waits until one
+// has been expired for another TTL, so an owner a little late with its
+// heartbeat (which then fails) can subscribe again and keep its jobs. Each is
 // unsubscribed as Unsubscribe would (soft-deleted, its pending jobs drained
 // if it was subscribed with WithAutoDrain; jobs being performed or already
 // retried are kept, as Drain keeps them). It handles at most
 // UnsubscribeExpiredLimit subscriptions a call, oldest first, so call it
-// periodically (from a heartbeat loop, say); nothing else removes expired
-// subscriptions. It returns how many it unsubscribed; with an error, how
+// periodically; nothing else removes expired subscriptions. Draining a long
+// queue takes a while, and every instance's call waits on the same one, so
+// call it from a goroutine of its own, with a timeout, not from a heartbeat
+// loop; a call cut short is finished by the next one. A subscription whose
+// drain cannot finish a batch within a call's timeout stays first in line
+// and holds back the ones after it. It returns how many it unsubscribed; with an error, how
 // many it had unsubscribed before it (one whose last batch committed as the
 // error came may be missing). A subscription that a Subscribe to the same
 // queue and pattern replaces while it is being drained is not counted,

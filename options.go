@@ -143,8 +143,9 @@ func WithPlanConfig(config *PlanConfig) SubscribeOption {
 // WithTTL sets the TTL (Time To Live) for a subscription.
 // If no heartbeat renews it within this duration, it expires: Publish no
 // longer matches it and Heartbeat cannot revive it. It stays in the database,
-// with its pending jobs, until someone calls UnsubscribeExpired
-// (ExpiredUnsubscriber), which should be done periodically.
+// with its pending jobs, until it has been expired for another TTL and
+// someone calls UnsubscribeExpired (ExpiredUnsubscriber), which should be
+// done periodically.
 func WithTTL(ttl time.Duration) SubscribeOption {
 	return func(o *SubscribeOptions) {
 		o.TTL = ttl

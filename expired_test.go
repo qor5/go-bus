@@ -18,7 +18,7 @@ import (
 // expire makes the live subscriptions of queue look expired a second ago.
 func expire(t *testing.T, queue string) {
 	t.Helper()
-	_, err := db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '1 second' WHERE queue = $1 AND deleted_at IS NULL`, queue)
+	_, err := db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '1 day' WHERE queue = $1 AND deleted_at IS NULL`, queue)
 	require.NoError(t, err)
 }
 
@@ -325,7 +325,7 @@ func TestUnsubscribeExpiredDrainsOnlyItsPattern(t *testing.T) {
 	require.NoError(t, err)
 	publishN(t, b, "gone.topic", 3)
 	publishN(t, b, "stays.topic", 2)
-	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '1 second' WHERE pattern = 'gone.topic'`)
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '1 day' WHERE pattern = 'gone.topic'`)
 	require.NoError(t, err)
 
 	n, err := unsubscribeExpired(ctx, b)
@@ -346,7 +346,7 @@ func TestUnsubscribeExpiredOldestFirst(t *testing.T) {
 	for queue, ago := range map[string]int{"a": 3, "b": 1, "c": 2} {
 		_, err := b.Queue(queue).Subscribe(ctx, "old.topic", bus.WithTTL(time.Minute))
 		require.NoError(t, err)
-		_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - $2 * INTERVAL '1 minute' WHERE queue = $1`, queue, ago)
+		_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '1 day' - $2 * INTERVAL '1 minute' WHERE queue = $1`, queue, ago)
 		require.NoError(t, err)
 	}
 	for _, queue := range []string{"a", "c", "b"} {
@@ -371,7 +371,7 @@ func TestUnsubscribeExpiredSkipsASubscriptionReplacedMeanwhile(t *testing.T) {
 	subscribe("second")
 	publishN(t, b, "first.topic", 1)
 	publishN(t, b, "second.topic", 2)
-	_, err := db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '2 seconds' WHERE queue = 'first'`)
+	_, err := db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '1 day 2 seconds' WHERE queue = 'first'`)
 	require.NoError(t, err)
 	expire(t, "second")
 	blocker := lockJob(t, "first", 0) // holds the call on the first subscription
@@ -462,6 +462,10 @@ func TestUnsubscribeExpiredDoesNotDeleteAHeartbeatSucceededOn(t *testing.T) {
 	sub, err := q.Subscribe(ctx, "beat.topic", bus.WithTTL(time.Minute), bus.WithAutoDrain(true))
 	require.NoError(t, err)
 	publishN(t, b, "beat.topic", 1500)
+	// a short TTL from now on, so the grace of one TTL after the expiry is
+	// over by the time the call runs
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET options = jsonb_set(options, '{ttl}', '20000000') WHERE queue = 'beat' AND deleted_at IS NULL`)
+	require.NoError(t, err)
 
 	beat, err := db.Begin()
 	require.NoError(t, err)
@@ -494,4 +498,30 @@ func TestUnsubscribeExpiredDoesNotDeleteAHeartbeatSucceededOn(t *testing.T) {
 		assert.ErrorIs(t, beatErr, bus.ErrSubscriptionNotFound)
 		assert.Equal(t, 0, liveSubscriptions(t, "beat"))
 	}
+}
+
+// A subscription expired for less than its TTL is not unsubscribed yet: its
+// owner may be late with a Heartbeat (a pause, a slow database), and would
+// lose its pending jobs if they were drained at once.
+func TestUnsubscribeExpiredWaitsATTLAfterTheExpiry(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+	_, err := b.Queue("late").Subscribe(ctx, "late.topic", bus.WithTTL(time.Minute), bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishN(t, b, "late.topic", 3)
+
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '50 seconds' WHERE queue = 'late'`)
+	require.NoError(t, err)
+	n, err := unsubscribeExpired(ctx, b)
+	require.NoError(t, err)
+	assert.Zero(t, n, "expired for less than its TTL")
+	assert.Equal(t, 1, liveSubscriptions(t, "late"))
+	assert.Equal(t, 3, pendingJobs(t, "late"))
+
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '70 seconds' WHERE queue = 'late'`)
+	require.NoError(t, err)
+	n, err = unsubscribeExpired(ctx, b)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Zero(t, pendingJobs(t, "late"))
 }

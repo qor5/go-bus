@@ -91,6 +91,10 @@ func (d *Dialect) Migrate(ctx context.Context) error {
 
 var _ bus.ExpiredUnsubscriberDialect = (*Dialect)(nil)
 
+// expiredForATTL holds for a subscription that expired at least its TTL ago
+// (options.ttl is in nanoseconds, as Heartbeat reads it).
+const expiredForATTL = `expires_at <= NOW() - (COALESCE((options->>'ttl')::bigint, 0) / 1000) * INTERVAL '1 microsecond'`
+
 // UnsubscribeExpired unsubscribes up to limit subscriptions whose TTL ran out
 // (by the database's clock), oldest first, and returns how many. Each is
 // unsubscribed as by unsubscribeInBatches: drained, if it asked for
@@ -98,6 +102,12 @@ var _ bus.ExpiredUnsubscriberDialect = (*Dialect)(nil)
 // soft-deleted with the last one. It never joins a transaction ctx carries,
 // which would hold every batch's locks until the caller commits. It stops at
 // the first error; the next call resumes, oldest first.
+//
+// A subscription counts as abandoned once it has been expired for another
+// TTL (expiredForATTL): an owner late with a Heartbeat (a pause, a slow
+// database) gets that long to subscribe again and keep its pending jobs.
+// One that Unsubscribe expired (to the epoch) and did not finish counts at
+// once.
 //
 // Publish no longer matches an expired subscription, but a publish whose
 // transaction read the subscriptions before it expired can still add a job
@@ -109,7 +119,7 @@ func (d *Dialect) UnsubscribeExpired(ctx context.Context, limit int) (int, error
 	ctx = bussql.NewContext(ctx, d.db)
 	rows, err := d.db.QueryContext(ctx,
 		`SELECT id FROM gobus_subscriptions
-         WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW()
+         WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW() AND `+expiredForATTL+`
          ORDER BY expires_at, id
          LIMIT $1`, limit)
 	if err != nil {
@@ -162,7 +172,7 @@ func (d *Dialect) unsubscribeExpired(ctx context.Context, id int64) (bool, error
 		var optionsData []byte
 		err := tx.QueryRowContext(ctx,
 			`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
-			 WHERE id = $1 AND deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW()
+			 WHERE id = $1 AND deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW() AND `+expiredForATTL+`
 			 RETURNING queue, pattern, options`, id).Scan(&queue, &pattern, &optionsData)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // unsubscribed or replaced meanwhile

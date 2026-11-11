@@ -495,24 +495,50 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) error {
 	// soft-deleted in batches (unsubscribeInBatches); if that fails, it stays
 	// expired, receiving nothing, with its remaining jobs, and calling
 	// Unsubscribe on it again (or UnsubscribeExpired) finishes it.
-	var id int64
+	var id, upTo int64
 	var autoDrain bool
 	err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var optionsData []byte
-		err := tx.QueryRowContext(ctx,
-			`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
-			 WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
-			 RETURNING id, options`, queue, pattern).Scan(&id, &optionsData)
-		if err != nil {
-			return err
+		for attempt := 1; ; attempt++ {
+			err := tx.QueryRowContext(ctx,
+				`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
+				 WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
+				 RETURNING id, options`, queue, pattern).Scan(&id, &optionsData)
+			if !errors.Is(err, sql.ErrNoRows) {
+				if err != nil {
+					return errors.Wrap(err, "failed to expire subscription")
+				}
+				break
+			}
+			// An UPDATE that waited for a Subscribe replacing the row finds
+			// it deleted and does not see the new one: PostgreSQL rechecks
+			// only the rows it waited for. A new statement sees it, so
+			// unsubscribe that one, as if this came right after.
+			var live bool
+			if err := tx.QueryRowContext(ctx,
+				`SELECT EXISTS (SELECT 1 FROM gobus_subscriptions
+				 WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL)`, queue, pattern).Scan(&live); err != nil {
+				return errors.Wrap(err, "failed to look up subscription")
+			}
+			if !live {
+				return sql.ErrNoRows
+			}
+			if attempt == 3 {
+				return errors.New("failed to expire subscription: it kept being replaced")
+			}
 		}
 		var options bus.SubscribeOptions
 		autoDrain = json.Unmarshal(optionsData, &options) == nil && options.AutoDrain
-		if !autoDrain {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE gobus_subscriptions SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1`, id); err != nil {
-				return errors.Wrap(err, "failed to soft delete subscription")
+		if autoDrain {
+			// read with the expiry, so that every job of a subscription
+			// that replaces this one is above it (see unsubscribeInBatches)
+			var err error
+			if upTo, err = lastJobIDInTx(ctx, tx); err != nil {
+				return err
 			}
+		} else if _, err := tx.ExecContext(ctx,
+			`UPDATE gobus_subscriptions SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1`, id); err != nil {
+			return errors.Wrap(err, "failed to soft delete subscription")
 		}
 		return d.updateMetadata(ctx, tx)
 	})
@@ -520,12 +546,12 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) error {
 		return nil // deleting a subscription that does not exist succeeds
 	}
 	if err != nil {
-		return errors.Wrap(err, "failed to expire subscription")
+		return err
 	}
 	if !autoDrain {
 		return nil
 	}
-	_, err = d.unsubscribeInBatches(ctx, "id = $1", id)
+	_, err = d.unsubscribeInBatches(ctx, id, queue, pattern, upTo)
 	return err
 }
 
@@ -722,57 +748,43 @@ func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern
 	return picked, deleted, lastID.Int64, nil
 }
 
-// unsubscribeInBatches unsubscribes the live subscription that cond (with
-// args) picks, if any, and reports whether it did. If the subscription asked
-// for auto-drain, its pending jobs are deleted first, drainBatch at a time,
-// each batch in a transaction of its own, and it is soft-deleted in the
-// transaction of the last batch.
+// unsubscribeInBatches finishes unsubscribing subscription id, of queue and
+// pattern, which asked for auto-drain and has been expired: it deletes the
+// pending jobs of queue and pattern with ids up to upTo, drainBatch at a
+// time, each batch in a transaction of its own, and soft-deletes the
+// subscription, if it is still there, with the last batch. It reports
+// whether it soft-deleted it.
 //
-// Each transaction starts by locking the subscription's row. A Subscribe to
-// the same queue and pattern, which soft-deletes that row, so waits for the
-// batch, and the next batch no longer finds the subscription and stops: jobs
-// carry only the queue and the pattern, so draining on would delete the new
-// subscription's jobs. Until the soft delete the subscription stays as it
-// was, so a drain cut short (an error, a deadline) is resumed by the next
-// call.
-func (d *Dialect) unsubscribeInBatches(ctx context.Context, cond string, args ...any) (bool, error) {
+// upTo must have been read (lastJobIDInTx) in the transaction that expired
+// the subscription, or that locked its row while it was expired. A Subscribe
+// to the same queue and pattern replaces such a row only after that
+// transaction commits, so every job published to the new subscription has a
+// higher id than upTo: the drain goes on to upTo even if the subscription is
+// replaced meanwhile (jobs carry only the queue and the pattern), deleting
+// the old subscription's jobs and keeping the new one's. A drain cut short
+// (an error, a deadline) leaves the subscription expired, receiving nothing,
+// with the rest of its jobs; unsubscribing it again finishes it.
+func (d *Dialect) unsubscribeInBatches(ctx context.Context, id int64, queue, pattern string, upTo int64) (bool, error) {
 	var after int64
-	upTo := int64(-1) // read in the first batch's transaction, see lastJobIDInTx
 	for {
 		var done, more bool
 		err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			var id int64
-			var queue, pattern string
-			var optionsData []byte
-			err := tx.QueryRowContext(ctx,
-				`SELECT id, queue, pattern, options FROM gobus_subscriptions
-				 WHERE deleted_at IS NULL AND (`+cond+`)
-				 FOR UPDATE`, args...).Scan(&id, &queue, &pattern, &optionsData)
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil // unsubscribed or replaced meanwhile
-			}
+			picked, _, last, err := d.drainBatchInTx(ctx, tx, queue, pattern, after, upTo)
 			if err != nil {
-				return errors.Wrap(err, "failed to lock subscription")
+				return err
 			}
-			var options bus.SubscribeOptions
-			if json.Unmarshal(optionsData, &options) == nil && options.AutoDrain {
-				if upTo < 0 {
-					if upTo, err = lastJobIDInTx(ctx, tx); err != nil {
-						return err
-					}
-				}
-				picked, _, last, err := d.drainBatchInTx(ctx, tx, queue, pattern, after, upTo)
-				if err != nil {
-					return err
-				}
-				if picked == drainBatch {
-					after, more = last, true
-					return nil
-				}
+			if picked == drainBatch {
+				after, more = last, true
+				return nil
 			}
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE gobus_subscriptions SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1`, id); err != nil {
+			res, err := tx.ExecContext(ctx,
+				`UPDATE gobus_subscriptions SET deleted_at = NOW(), updated_at = NOW()
+				 WHERE id = $1 AND deleted_at IS NULL`, id)
+			if err != nil {
 				return errors.Wrap(err, "failed to soft delete subscription")
+			}
+			if n, err := res.RowsAffected(); err != nil || n == 0 {
+				return errors.Wrap(err, "failed to soft delete subscription") // nil when replaced meanwhile
 			}
 			done = true
 			return d.updateMetadata(ctx, tx)

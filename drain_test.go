@@ -136,19 +136,27 @@ func TestUnsubscribeSparesASubscriptionMadeDuringTheDrain(t *testing.T) {
 	unsubscribed := make(chan error, 1)
 	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
 	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	// while the drain is held, the owner subscribes again (other options: the
+	// same ones would find the old subscription and keep it) and publishes
 	subscribed := make(chan error, 1)
-	go func() { // other options: the same ones would find the old subscription and keep it
+	go func() {
 		_, err := q.Subscribe(ctx, "again.topic", bus.WithAutoDrain(true), bus.WithTTL(time.Minute))
 		subscribed <- err
 	}()
-	require.Eventually(t, func() bool { return lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond, "the new Subscribe waits for the batch")
+	select {
+	case err := <-subscribed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		require.NoError(t, blocker.Commit())
+		t.Fatal("the new Subscribe waited for the drain")
+	}
+	publishMany(t, b, "again.topic", 1)
 	require.NoError(t, blocker.Commit())
 	require.NoError(t, <-unsubscribed)
-	require.NoError(t, <-subscribed)
-	publishMany(t, b, "again.topic", 1)
 
 	assert.Len(t, mustSubscriptions(t, q), 1)
-	assert.Equal(t, 501, queueJobs(t, "again"), "the drain stopped at the new subscription; its job is kept")
+	assert.Equal(t, 1, queueJobs(t, "again"),
+		"the old subscription's jobs are all drained and the new subscription's job is kept")
 }
 
 func mustSubscriptions(t *testing.T, q bus.Queue) []bus.Subscription {
@@ -355,4 +363,33 @@ func TestUnsubscribeWithAutoDrainBumpsTheVersionBeforeItDrains(t *testing.T) {
 	require.NoError(t, blocker.Rollback())
 	require.NoError(t, <-done)
 	assert.Greater(t, during.Version, before.Version, "the version was not bumped while the drain ran")
+}
+
+// An Unsubscribe that waits for a Subscribe replacing the subscription (other
+// options) unsubscribes the new one, as if it came right after: its jobs are
+// drained. PostgreSQL rechecks only the row an UPDATE waited for, so the
+// first UPDATE finds the old row gone and does not see the new one.
+func TestUnsubscribeAfterAWaitedForSubscribeStillUnsubscribes(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("swap")
+	sub, err := q.Subscribe(ctx, "swap.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "swap.topic", 10)
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = q.Subscribe(bussql.NewContext(ctx, tx), "swap.topic", bus.WithAutoDrain(true), bus.WithTTL(time.Minute))
+	require.NoError(t, err)
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond, "the Unsubscribe waits for the Subscribe")
+	require.NoError(t, tx.Commit())
+	require.NoError(t, <-unsubscribed)
+
+	assert.Empty(t, mustSubscriptions(t, q), "the new subscription is unsubscribed")
+	assert.Equal(t, 0, queueJobs(t, "swap"), "the old subscription's jobs are drained")
 }

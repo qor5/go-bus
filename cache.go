@@ -2,13 +2,17 @@ package bus
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/pkg/errors"
 	"github.com/rs/xid"
-	"golang.org/x/sync/singleflight"
+
+	"github.com/qor5/go-bus/bussql"
 )
 
 var _ Dialect = (*cacheDialect)(nil)
@@ -119,31 +123,42 @@ func CacheDecorator(cache Cache) DialectDecorator {
 type cacheDialect struct {
 	Dialect
 	cache   Cache
-	sfg     singleflight.Group
-	version int64 // Database version, accessed atomically
+	flights freshFlights
+	version int64    // Database version, accessed atomically
+	filling sync.Map // subjects a background lookup runs for
 }
 
-func (c *cacheDialect) checkVersion(ctx context.Context) (bool, error) {
-	ch := c.sfg.DoChan("checkVersion", func() (any, error) {
+// withoutTx drops the caller's transaction from ctx, for a call that callers
+// share: the others are not part of that transaction, which may also be over
+// by the time the call runs.
+func withoutTx(ctx context.Context) context.Context {
+	return bussql.NewContext(ctx, nil)
+}
+
+// txOf returns the transaction ctx carries, if any.
+func txOf(ctx context.Context) *sql.Tx {
+	tx, _ := bussql.FromContext(ctx, nil).(*sql.Tx)
+	return tx
+}
+
+// checkVersion reads the metadata version, clearing the cache if it moved
+// on, and returns the version it read.
+func (c *cacheDialect) checkVersion(ctx context.Context) (int64, error) {
+	val, err := c.flights.do(withoutTx(ctx), "checkVersion", func(ctx context.Context) (any, error) {
 		meta, err := c.GetMetadata(ctx)
 		if err != nil {
-			return false, errors.Wrap(err, "failed to get metadata")
+			return int64(0), errors.Wrap(err, "failed to get metadata")
 		}
 		if meta.Version != atomic.LoadInt64(&c.version) {
 			atomic.StoreInt64(&c.version, meta.Version)
 			c.cache.Clear()
-			return true, nil // Cache was cleared
 		}
-
-		return false, nil // Cache was not cleared
+		return meta.Version, nil
 	})
-
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case res := <-ch:
-		return res.Val.(bool), res.Err
+	if err != nil {
+		return 0, err
 	}
+	return val.(int64), nil
 }
 
 // getCachedSubscriptionsIfValid retrieves cached subscriptions if they exist and are not expired.
@@ -164,53 +179,252 @@ func (c *cacheDialect) getCachedSubscriptionsIfValid(subject string) ([]Subscrip
 	return nil, false
 }
 
+// bySubjectKey is the cache key of subject's subscriptions read under the
+// metadata version: a lookup caches what it read under the version it began
+// with, so a list read before a change is never served after it, even if it
+// is stored after the change cleared the cache.
+func bySubjectKey(version int64, subject string) string {
+	return fmt.Sprintf("v%d:BySubject:%s", version, subject)
+}
+
 // BySubject retrieves subscriptions for a subject, using cache when possible
 func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscription, error) {
-	cacheKey := "BySubject:" + subject
+	if txOf(ctx) != nil {
+		return c.bySubjectInTx(ctx, subject)
+	}
 
-	subs, found := c.getCachedSubscriptionsIfValid(cacheKey)
-	if found || atomic.LoadInt64(&c.version) == 0 {
-		cleared, err := c.checkVersion(ctx)
+	seen := atomic.LoadInt64(&c.version)
+	subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(seen, subject))
+	if found || seen == 0 {
+		version, err := c.checkVersion(ctx)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to check version")
 		}
-		if found && !cleared {
+		// compare with the version the cache was read under: another
+		// caller's check may have moved c.version on in between
+		if found && version == seen {
 			return subs, nil
 		}
 	}
 
-	ch := c.sfg.DoChan(cacheKey, func() (any, error) {
-		// Double-check cache after acquiring lock (another goroutine might have updated it)
-		if subs, found := c.getCachedSubscriptionsIfValid(cacheKey); found {
-			return subs, nil
-		}
-
-		currentVersion := atomic.LoadInt64(&c.version)
-
+	// no second look at the cache here: freshFlights runs this only for
+	// callers that arrived before it started, and what another call cached
+	// may have been read before a Subscribe that committed before them
+	val, err := c.flights.do(withoutTx(ctx), "BySubject:"+subject, func(ctx context.Context) (any, error) {
+		version := atomic.LoadInt64(&c.version)
 		subs, err := c.Dialect.BySubject(ctx, subject)
 		if err != nil {
 			return nil, err
 		}
-
-		// Only cache if version hasn't changed during query
-		if currentVersion == atomic.LoadInt64(&c.version) {
-			c.cache.Set(cacheKey, subs)
-		}
-		// else {
-		// Version changed, data might be stale, don't cache
-		// But still return the data we fetched to avoid another query
-		// }
-
+		c.cache.Set(bySubjectKey(version, subject), subs)
 		return subs, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return val.([]Subscription), nil
+}
+
+// bySubjectInTx looks subject's subscriptions up for a caller in a
+// transaction, on that transaction: a shared call on another connection
+// could wait forever for one when such callers use up the pool, and would
+// not see the transaction's own changes.
+//
+// The cache serves it while the version the transaction reads is the one
+// last read outside any transaction (c.version): then the transaction has
+// not bumped it, which every change of the subscriptions does on the same
+// row. What it reads itself is never cached: goroutines sharing the
+// transaction can change the subscriptions between its reads, and if the
+// transaction rolls back, the cache would deliver to a subscription that
+// never existed. Instead, on a miss, a lookup outside the transaction fills
+// the cache in the background, so that callers who only publish in
+// transactions (an outbox) get the cache too.
+func (c *cacheDialect) bySubjectInTx(ctx context.Context, subject string) ([]Subscription, error) {
+	meta, err := c.GetMetadata(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get metadata")
+	}
+	if meta.Version == atomic.LoadInt64(&c.version) {
+		if subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(meta.Version, subject)); found {
+			return subs, nil
+		}
+	}
+	c.fillInBackground(subject)
+	return c.Dialect.BySubject(ctx, subject)
+}
+
+// fillInBackground looks subject up outside any transaction, caching the
+// result, unless such a lookup it started still runs. Nobody waits for it,
+// so it cannot hold a caller in a transaction waiting for a second
+// connection.
+func (c *cacheDialect) fillInBackground(subject string) {
+	if _, running := c.filling.LoadOrStore(subject, struct{}{}); running {
+		return
+	}
+	go func() {
+		defer c.filling.Delete(subject)
+		ctx, cancel := context.WithTimeout(context.Background(), backgroundFillTimeout)
+		defer cancel()
+		_, _ = c.BySubject(ctx, subject)
+	}()
+}
+
+// backgroundFillTimeout bounds a lookup nobody waits for.
+const backgroundFillTimeout = 30 * time.Second
+
+// freshFlights coalesces concurrent calls by key, like singleflight, except
+// that a caller never gets the result of a call that started before it
+// arrived: one that read the database earlier may miss a subscription
+// committed before the caller began. A caller that finds a call running
+// waits for the next one, which starts when the running one ends and which
+// every caller arriving meanwhile shares.
+//
+// A call runs with the values of the ctx of the caller that started it, but
+// not with its deadline or cancellation: it ends when it returns, when every
+// caller waiting for it has given up, or at the latest deadline among them,
+// unless one of them has no deadline, as a call on that caller's own ctx
+// would. So no caller's deadline cuts the call short for another, and a call
+// that hangs (a dead connection) holds nobody past their own deadlines. Such
+// a call with a caller without a deadline runs until the driver or TCP gives
+// up on the connection, and callers of the key meanwhile wait for the next
+// call behind it and fail at their deadlines, as they did on main, where a
+// call ran on the first caller's ctx.
+type freshFlights struct {
+	mu      sync.Mutex
+	running map[string]*freshCall
+	next    map[string]*freshCall
+}
+
+// errSharedCallTimedOut is what a caller whose own ctx is fine gets from a
+// call that ran past the deadlines of all its callers.
+var errSharedCallTimedOut = errors.Wrap(context.DeadlineExceeded, "shared call ran past the deadlines of its callers")
+
+type freshCall struct {
+	fn        func(context.Context) (any, error)
+	ctx       context.Context
+	cancel    context.CancelFunc
+	waiters   int         // guarded by freshFlights.mu
+	deadline  time.Time   // guarded by freshFlights.mu
+	unbounded bool        // a caller without a deadline waits for it; guarded by freshFlights.mu
+	timer     *time.Timer // guarded by freshFlights.mu
+	timedOut  atomic.Bool // its deadline ended it
+	done      chan struct{}
+	val       any
+	err       error
+}
+
+// wait counts one more caller waiting for the call and moves the call's
+// deadline to the caller's if that is later; a caller without a deadline
+// lifts it. It reports false, counting nobody, if the call's deadline passed
+// already. Called with freshFlights.mu held.
+func (c *freshCall) wait(ctx context.Context) bool {
+	if c.timedOut.Load() {
+		return false
+	}
+	d, ok := ctx.Deadline()
+	if !ok || c.unbounded {
+		if !c.unbounded && c.timer != nil && !c.timer.Stop() {
+			return false // the timer fired as we came
+		}
+		c.unbounded = true
+		c.waiters++
+		return true
+	}
+	c.waiters++
+	if !d.After(c.deadline) {
+		return true
+	}
+	c.deadline = d
+	if c.timer == nil {
+		c.timer = time.AfterFunc(time.Until(d), func() {
+			c.timedOut.Store(true)
+			c.cancel()
+		})
+	} else if !c.timer.Reset(time.Until(d)) {
+		// it fired as we came: the call is cancelled. Reset scheduled it
+		// again all the same; stop that, so it does not keep the call.
+		c.timer.Stop()
+		c.waiters--
+		return false
+	}
+	return true
+}
+
+func newFreshCall(ctx context.Context, fn func(context.Context) (any, error)) *freshCall {
+	cctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	return &freshCall{fn: fn, ctx: cctx, cancel: cancel, done: make(chan struct{})}
+}
+
+func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Context) (any, error)) (any, error) {
+	f.mu.Lock()
+	if f.running == nil {
+		f.running = map[string]*freshCall{}
+		f.next = map[string]*freshCall{}
+	}
+	call := f.next[key]
+	if call != nil && !call.wait(ctx) {
+		// its deadline passed before it started: its callers get that, and
+		// this caller gets a new call
+		delete(f.next, key)
+		call.err = errSharedCallTimedOut
+		close(call.done)
+		call = nil
+	}
+	switch {
+	case f.running[key] == nil:
+		call = newFreshCall(ctx, fn)
+		call.wait(ctx)
+		f.running[key] = call
+		go f.run(key, call)
+	case call == nil:
+		call = newFreshCall(ctx, fn)
+		call.wait(ctx)
+		f.next[key] = call
+	}
+	f.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
+		f.mu.Lock()
+		call.waiters--
+		if call.waiters == 0 {
+			// nobody waits for it any more: end it, and if it has not
+			// started, drop it so that a caller arriving now starts afresh
+			// rather than share a cancelled call
+			if f.next[key] == call {
+				delete(f.next, key)
+			}
+			if call.timer != nil {
+				call.timer.Stop() // or it keeps the call until its deadline
+			}
+			call.cancel()
 		}
-		return res.Val.([]Subscription), nil
+		f.mu.Unlock()
+		return nil, ctx.Err()
+	case <-call.done:
+		return call.val, call.err
 	}
+}
+
+func (f *freshFlights) run(key string, call *freshCall) {
+	call.val, call.err = call.fn(call.ctx)
+	if call.err != nil && call.timedOut.Load() {
+		call.err = errSharedCallTimedOut
+	}
+	call.cancel()
+	close(call.done)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if call.timer != nil {
+		call.timer.Stop()
+	}
+	next := f.next[key]
+	delete(f.next, key)
+	if next == nil {
+		delete(f.running, key)
+		return
+	}
+	f.running[key] = next
+	go f.run(key, next)
 }

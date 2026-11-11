@@ -1,0 +1,223 @@
+package bus
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"runtime/pprof"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/qor5/go-bus/bussql"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestFreshFlightsShareTheNextCall verifies that callers arriving while a
+// call runs do not get its result, and share one call after it.
+func TestFreshFlightsShareTheNextCall(t *testing.T) {
+	var f freshFlights
+	var calls atomic.Int64
+	release := make(chan struct{})
+	fn := func(context.Context) (any, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			<-release
+		}
+		return n, nil
+	}
+	ctx := context.Background()
+	first := make(chan any, 1)
+	go func() { v, _ := f.do(ctx, "k", fn); first <- v }()
+	require.Eventually(t, func() bool { return calls.Load() == 1 }, time.Second, time.Millisecond)
+
+	var wg sync.WaitGroup
+	got := make(chan any, 5)
+	for range 5 {
+		wg.Add(1)
+		go func() { defer wg.Done(); v, _ := f.do(ctx, "k", fn); got <- v }()
+	}
+	// All six wait for a result: the first and the five that joined the next call.
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 6 }, time.Second, time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(got)
+
+	assert.Equal(t, int64(1), recv(t, first))
+	for v := range got {
+		assert.Equal(t, int64(2), v, "the call after the running one")
+	}
+	assert.Equal(t, int64(2), calls.Load(), "the waiting callers share one call")
+}
+
+// waitingIn counts the goroutines blocked in a select in fn.
+func waitingIn(fn string) int {
+	var buf bytes.Buffer
+	_ = pprof.Lookup("goroutine").WriteTo(&buf, 2)
+	n := 0
+	for _, g := range strings.Split(buf.String(), "\n\n") {
+		if strings.Contains(g, "[select") && strings.Contains(g, fn) {
+			n++
+		}
+	}
+	return n
+}
+
+// A call nobody waits for any more is cancelled; one that had not started is
+// dropped, so a caller arriving afterwards starts a call of its own instead of
+// sharing a cancelled one.
+func TestFreshFlightsDropsACallEveryWaiterLeft(t *testing.T) {
+	var f freshFlights
+	release := make(chan struct{})
+	running := make(chan struct{})
+	go func() {
+		_, _ = f.do(context.Background(), "k", func(context.Context) (any, error) {
+			close(running)
+			<-release
+			return "first", nil
+		})
+	}()
+	recv(t, running)
+
+	// a caller that gives up while waiting for the next call
+	ctx, cancel := context.WithCancel(context.Background())
+	left := make(chan error, 1)
+	go func() {
+		_, err := f.do(ctx, "k", func(ctx context.Context) (any, error) { return "abandoned", ctx.Err() })
+		left <- err
+	}()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, recv(t, left), context.Canceled)
+
+	// a caller arriving now gets a call of its own, not the abandoned one
+	type result struct {
+		v   any
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		v, err := f.do(context.Background(), "k", func(ctx context.Context) (any, error) { return "fresh", ctx.Err() })
+		got <- result{v, err}
+	}()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
+	close(release)
+	select {
+	case r := <-got:
+		require.NoError(t, r.err)
+		assert.Equal(t, "fresh", r.v)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the caller got no result")
+	}
+}
+
+// A running call whose callers have all given up is cancelled.
+func TestFreshFlightsCancelsARunningCallEveryWaiterLeft(t *testing.T) {
+	var f freshFlights
+	ended := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	waited := make(chan error, 1)
+	go func() {
+		_, err := f.do(ctx, "k", func(ctx context.Context) (any, error) {
+			<-ctx.Done() // a call that hangs until cancelled
+			ended <- ctx.Err()
+			return nil, ctx.Err()
+		})
+		waited <- err
+	}()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 1 }, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, recv(t, waited), context.Canceled)
+	select {
+	case err := <-ended:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("the running call was not cancelled after its only caller left")
+	}
+}
+
+// recv receives from ch, failing the test rather than hanging if nothing
+// comes, as when the code a test guards is broken.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing received in 10s")
+		panic("unreachable")
+	}
+}
+
+// uncommittedSub stands for a subscription a transaction made and has not
+// committed.
+type uncommittedSub struct{ Subscription }
+
+func (uncommittedSub) ExpiresAt() time.Time { return time.Time{} }
+
+// inTxDialect reads, in a transaction, a subscription that transaction made
+// (another goroutine sharing it subscribed between this caller's reads), and
+// outside one, what is committed: nothing.
+type inTxDialect struct{ Dialect }
+
+func (inTxDialect) GetMetadata(context.Context) (*Metadata, error) {
+	return &Metadata{Version: 7}, nil
+}
+
+func (inTxDialect) BySubject(ctx context.Context, _ string) ([]Subscription, error) {
+	if txOf(ctx) != nil {
+		return []Subscription{uncommittedSub{}}, nil
+	}
+	return []Subscription{}, nil
+}
+
+// keyCache is a map Cache that keeps what was set until the test ends.
+type keyCache struct {
+	mu sync.Mutex
+	m  map[string][]Subscription
+}
+
+func (c *keyCache) Get(k string) ([]Subscription, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.m[k]
+	return v, ok
+}
+
+func (c *keyCache) Set(k string, v []Subscription) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[k] = v
+}
+
+func (c *keyCache) Del(k string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.m, k)
+}
+
+func (c *keyCache) Clear() {}
+
+// What a lookup reads in a transaction is never cached, even under the
+// version last read outside one: goroutines sharing the transaction can
+// change the subscriptions between its reads, and if it rolls back, the
+// cache would deliver to a subscription that never existed. The cache is
+// filled from outside the transaction instead.
+func TestCachedLookupInATransactionCachesNothingItRead(t *testing.T) {
+	cache := &keyCache{m: map[string][]Subscription{}}
+	c := &cacheDialect{Dialect: inTxDialect{}, cache: cache}
+	atomic.StoreInt64(&c.version, 7)
+
+	ctx := bussql.NewContext(context.Background(), &sql.Tx{})
+	subs, err := c.BySubject(ctx, "a.b")
+	require.NoError(t, err)
+	require.Len(t, subs, 1, "the transaction sees its own subscription")
+
+	require.Eventually(t, func() bool { _, ok := cache.Get(bySubjectKey(7, "a.b")); return ok },
+		time.Second, time.Millisecond, "the cache is filled from outside the transaction")
+	got, _ := cache.Get(bySubjectKey(7, "a.b"))
+	assert.Empty(t, got, "the cache took the transaction's uncommitted subscription")
+}

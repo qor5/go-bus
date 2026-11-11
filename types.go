@@ -92,6 +92,9 @@ type Consumer interface {
 type Queue interface {
 	// Subscribe registers the queue to receive messages published to subjects matching the pattern.
 	// Pattern supports NATS-style wildcards: '*' for a single token, '>' for multiple trailing tokens.
+	// It locks the existing subscription of the queue and pattern, if any; inside a transaction the
+	// context carries, that lock is held until the transaction ends, so two such transactions that
+	// subscribe to the same patterns in opposite orders can deadlock (PostgreSQL then fails one).
 	Subscribe(ctx context.Context, pattern string, opts ...SubscribeOption) (Subscription, error)
 
 	// Subscriptions returns all subscriptions for the queue.
@@ -136,7 +139,11 @@ type Subscription interface {
 	PlanConfig() *PlanConfig
 
 	// Unsubscribe removes this subscription.
-	// If autoDrain was enabled in the subscription options, pending jobs will be automatically cleaned up.
+	// If autoDrain was enabled in the subscription options, pending jobs will be automatically cleaned up:
+	// they are deleted in batches, a transaction each, and the subscription is removed with the last one.
+	// The subscription stops matching at once; if the drain fails midway, it stays, expired, with part of its jobs
+	// deleted, and calling Unsubscribe again finishes.
+	// Inside a transaction the context carries, every batch joins that transaction (see Drain).
 	// This method is usually executed when the subscription is not needed, and is not supposed to be executed with the exit of the program.
 	// This is because go-bus is designed to support offline messages.
 	Unsubscribe(ctx context.Context) error
@@ -151,6 +158,14 @@ type Subscription interface {
 
 	// Drain removes all pending jobs that are not currently being processed.
 	// This method is useful for cleaning up the queue without affecting jobs that are already running.
+	// Jobs are deleted in batches, a transaction each, so a failure leaves the batches before it deleted;
+	// inside a transaction the context carries, every batch joins that transaction.
+	// Drains of one queue and pattern take turns, a batch at a time; inside a transaction the context
+	// carries, the turn is held until it ends, so two such transactions that drain the same
+	// subscriptions in opposite orders can deadlock (PostgreSQL then fails one).
+	// It deletes the jobs whose ids are at most the highest one when it starts, so a
+	// message published after Drain starts is kept; one whose transaction began
+	// before and commits while Drain runs may still be deleted.
 	// Returns the number of jobs that were deleted.
 	Drain(ctx context.Context) (int, error)
 }

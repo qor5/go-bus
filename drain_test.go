@@ -1,0 +1,512 @@
+package bus_test
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/qor5/go-bus"
+	"github.com/qor5/go-bus/bussql"
+	"github.com/qor5/go-bus/pgbus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// publishMany publishes n messages on subject.
+func publishMany(t *testing.T, b bus.Bus, subject string, n int) {
+	t.Helper()
+	outs := make([]*bus.Outbound, n)
+	for i := range outs {
+		outs[i] = &bus.Outbound{Message: bus.Message{Subject: subject, Payload: json.RawMessage(`"m"`)}}
+	}
+	_, err := b.Publish(context.Background(), outs...)
+	require.NoError(t, err)
+}
+
+func queueJobs(t *testing.T, queue string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM goque_jobs WHERE queue = $1`, queue).Scan(&n))
+	return n
+}
+
+// TestDrainLocksOnlyTheJobsItDeletes verifies that Drain and Unsubscribe with
+// auto-drain take advisory locks only on the jobs of their own pattern, not
+// on every job of the queue: the locks last until the transaction ends, and
+// enough of them exhaust the lock table.
+func TestDrainLocksOnlyTheJobsItDeletes(t *testing.T) {
+	for name, drain := range map[string]func(t *testing.T, ctx context.Context, sub bus.Subscription) error{
+		"Drain": func(t *testing.T, ctx context.Context, sub bus.Subscription) error {
+			n, err := sub.Drain(ctx)
+			assert.Equal(t, 10, n)
+			return err
+		},
+		"Unsubscribe": func(_ *testing.T, ctx context.Context, sub bus.Subscription) error { return sub.Unsubscribe(ctx) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, _, _ := setupBusAndQueues(t)
+			defer func() { _ = b.Close() }()
+			ctx := context.Background()
+			q := b.Queue("locks")
+			sub, err := q.Subscribe(ctx, "mine.topic", bus.WithAutoDrain(true))
+			require.NoError(t, err)
+			_, err = q.Subscribe(ctx, "other.topic")
+			require.NoError(t, err)
+			publishMany(t, b, "mine.topic", 10)
+			publishMany(t, b, "other.topic", 300)
+
+			// In a transaction of the test's, so the locks can be counted.
+			tx, err := db.Begin()
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			require.NoError(t, drain(t, bussql.NewContext(ctx, tx), sub))
+			var locks int
+			require.NoError(t, tx.QueryRow(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 AND pid = pg_backend_pid()`).Scan(&locks))
+			assert.Equal(t, 10, locks, "a lock per deleted job")
+			require.NoError(t, tx.Commit())
+			assert.Equal(t, 300, queueJobs(t, "locks"))
+		})
+	}
+}
+
+// TestDrainALongQueue verifies that Drain and Unsubscribe with auto-drain
+// finish a queue whose jobs are more than one transaction can lock.
+func TestDrainALongQueue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("publishes 20000 messages")
+	}
+	for name, drain := range map[string]func(t *testing.T, ctx context.Context, sub bus.Subscription) error{
+		"Drain": func(t *testing.T, ctx context.Context, sub bus.Subscription) error {
+			n, err := sub.Drain(ctx)
+			assert.Equal(t, 20000, n)
+			return err
+		},
+		"Unsubscribe": func(_ *testing.T, ctx context.Context, sub bus.Subscription) error { return sub.Unsubscribe(ctx) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, _, _ := setupBusAndQueues(t)
+			defer func() { _ = b.Close() }()
+			ctx := context.Background()
+			sub, err := b.Queue("long").Subscribe(ctx, "long.topic", bus.WithAutoDrain(true))
+			require.NoError(t, err)
+			publishMany(t, b, "long.topic", 20000)
+
+			require.NoError(t, drain(t, ctx, sub))
+			assert.Zero(t, queueJobs(t, "long"))
+		})
+	}
+}
+
+// lockWaiting counts the sessions of the test database waiting for a lock.
+func lockWaiting(t *testing.T) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n))
+	return n
+}
+
+// holdJob holds a row lock on the job of queue at offset (in id order), in a
+// transaction the test ends.
+func holdJob(t *testing.T, queue string, offset int) *sql.Tx {
+	t.Helper()
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.Exec(`SELECT id FROM goque_jobs WHERE id = (SELECT id FROM goque_jobs WHERE queue = $1 ORDER BY id OFFSET $2 LIMIT 1) FOR UPDATE`, queue, offset)
+	require.NoError(t, err)
+	return tx
+}
+
+// TestUnsubscribeSparesASubscriptionMadeDuringTheDrain verifies that a
+// Subscribe to the same queue and pattern made while Unsubscribe drains in
+// batches waits for it, and that its jobs are not drained: jobs carry only the
+// queue and the pattern.
+func TestUnsubscribeSparesASubscriptionMadeDuringTheDrain(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("again")
+	sub, err := q.Subscribe(ctx, "again.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "again.topic", 1500)
+	blocker := holdJob(t, "again", 999) // the last job of the first batch
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	// while the drain is held, the owner subscribes again (other options: the
+	// same ones would find the old subscription and keep it) and publishes
+	subscribed := make(chan error, 1)
+	go func() {
+		_, err := q.Subscribe(ctx, "again.topic", bus.WithAutoDrain(true), bus.WithTTL(time.Minute))
+		subscribed <- err
+	}()
+	select {
+	case err := <-subscribed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		require.NoError(t, blocker.Commit())
+		t.Fatal("the new Subscribe waited for the drain")
+	}
+	publishMany(t, b, "again.topic", 1)
+	require.NoError(t, blocker.Commit())
+	require.NoError(t, recv(t, unsubscribed))
+
+	assert.Len(t, mustSubscriptions(t, q), 1)
+	assert.Equal(t, 1, queueJobs(t, "again"),
+		"the old subscription's jobs are all drained and the new subscription's job is kept")
+}
+
+func mustSubscriptions(t *testing.T, q bus.Queue) []bus.Subscription {
+	t.Helper()
+	subs, err := q.Subscriptions(context.Background())
+	require.NoError(t, err)
+	return subs
+}
+
+// TestUnsubscribeResumesAnInterruptedDrain verifies that an Unsubscribe whose
+// drain is cut short leaves the subscription expired but not deleted, and
+// that calling it again finishes.
+func TestUnsubscribeResumesAnInterruptedDrain(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("cut")
+	sub, err := q.Subscribe(ctx, "cut.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "cut.topic", 1500)
+	blocker := holdJob(t, "cut", 1200) // in the second batch
+
+	short, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	require.Error(t, sub.Unsubscribe(short))
+	require.NoError(t, blocker.Rollback())
+	assert.Empty(t, mustSubscriptions(t, q), "expired at once")
+	var rows int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM gobus_subscriptions WHERE queue = 'cut' AND deleted_at IS NULL`).Scan(&rows))
+	assert.Equal(t, 1, rows, "but not deleted yet")
+	assert.Equal(t, 500, queueJobs(t, "cut"), "the first batch was drained")
+
+	require.NoError(t, sub.Unsubscribe(ctx))
+	assert.Empty(t, mustSubscriptions(t, q))
+	assert.Zero(t, queueJobs(t, "cut"))
+}
+
+// TestDrainKeepsAJobRetriedDuringTheDrain verifies that a job a worker retried
+// after the drain read it, but before the drain deleted it, is kept.
+func TestDrainKeepsAJobRetriedDuringTheDrain(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	sub, err := b.Queue("retry").Subscribe(ctx, "retry.topic")
+	require.NoError(t, err)
+	publishMany(t, b, "retry.topic", 3)
+	worker, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = worker.Rollback() }()
+	_, err = worker.Exec(`UPDATE goque_jobs SET retry_count = 1 WHERE id = (SELECT min(id) FROM goque_jobs WHERE queue = 'retry')`)
+	require.NoError(t, err)
+
+	type result struct {
+		n   int
+		err error
+	}
+	drained := make(chan result, 1)
+	go func() { n, err := sub.Drain(ctx); drained <- result{n, err} }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, worker.Commit())
+	r := recv(t, drained)
+	require.NoError(t, r.err)
+	assert.Equal(t, 2, r.n)
+	assert.Equal(t, 1, queueJobs(t, "retry"), "the retried job is kept")
+}
+
+// TestSubscribeDuringUnsubscribeKeepsTheSubscription verifies that a
+// Subscribe with the same options as a subscription being unsubscribed
+// leaves a live subscription once both are done, rather than handing back
+// the old one that the unsubscribe then removes.
+func TestSubscribeDuringUnsubscribeKeepsTheSubscription(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("same")
+	subscribe := func() (bus.Subscription, error) { return q.Subscribe(ctx, "same.topic", bus.WithAutoDrain(true)) }
+	sub, err := subscribe()
+	require.NoError(t, err)
+	publishMany(t, b, "same.topic", 1500)
+	blocker := holdJob(t, "same", 999) // the last job of the first batch
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	subscribed := make(chan error, 1)
+	go func() { _, err := subscribe(); subscribed <- err }()
+	// The Subscribe returns at once, or waits for the batch.
+	require.Eventually(t, func() bool { return len(subscribed) == 1 || lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, blocker.Commit())
+	require.NoError(t, recv(t, unsubscribed))
+	require.NoError(t, recv(t, subscribed))
+
+	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe wins")
+}
+
+// TestSubscribeWaitsForAnUnsubscribeThatCameFirst verifies that a Subscribe
+// with the same options does not return a subscription an Unsubscribe that
+// came first is about to remove: it waits for the row, and then replaces it.
+func TestSubscribeWaitsForAnUnsubscribeThatCameFirst(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("first")
+	subscribe := func() (bus.Subscription, error) { return q.Subscribe(ctx, "first.topic") }
+	sub, err := subscribe()
+	require.NoError(t, err)
+	holder, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = holder.Rollback() }()
+	_, err = holder.Exec(`SELECT id FROM gobus_subscriptions WHERE queue = 'first' AND deleted_at IS NULL FOR UPDATE`)
+	require.NoError(t, err)
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	subscribed := make(chan error, 1)
+	go func() { _, err := subscribe(); subscribed <- err }()
+	require.Eventually(t, func() bool { return len(subscribed) == 1 || lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, holder.Commit())
+	require.NoError(t, recv(t, unsubscribed))
+	require.NoError(t, recv(t, subscribed))
+
+	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe wins")
+}
+
+// drainChasing drains (or unsubscribes with auto-drain) a 2,500-job queue,
+// holding it on its second batch while one more message is published, and
+// returns whether that message survived.
+func drainChasing(t *testing.T, queue string, run func(ctx context.Context, sub bus.Subscription) error, opts ...bus.SubscribeOption) bool {
+	t.Helper()
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue(queue)
+	subject := queue + ".topic"
+	sub, err := q.Subscribe(ctx, subject, opts...)
+	require.NoError(t, err)
+	publishMany(t, b, subject, 2500)
+	blocker := holdJob(t, queue, 1999) // a job of the second batch
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, sub) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+
+	// a message delivered meanwhile: a copy of a pending job, as a publisher
+	// whose cached subscriptions still match would add (a Subscribe here
+	// would wait for the unsubscribe's batch)
+	var newID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO goque_jobs (queue, args, run_at, retry_policy)
+		SELECT queue, args, now(), retry_policy FROM goque_jobs WHERE queue = $1 ORDER BY id LIMIT 1
+		RETURNING id`, queue).Scan(&newID))
+	require.NoError(t, blocker.Rollback())
+	require.NoError(t, recv(t, done))
+
+	var exists bool
+	require.NoError(t, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM goque_jobs WHERE id = $1)`, newID).Scan(&exists))
+	return exists
+}
+
+// Drain deletes the jobs pending when it is called, not ones published while
+// it runs: those are new messages, which a drain that walked on to the end of
+// the queue would lose (and, published fast enough, would never let it end).
+func TestDrainLeavesJobsPublishedWhileItRuns(t *testing.T) {
+	survived := drainChasing(t, "chase_drain", func(ctx context.Context, sub bus.Subscription) error {
+		_, err := sub.Drain(ctx)
+		return err
+	})
+	assert.True(t, survived, "a message published while Drain ran was deleted")
+}
+
+// The same for the drain of Unsubscribe with auto-drain.
+func TestUnsubscribeLeavesJobsPublishedWhileItDrains(t *testing.T) {
+	survived := drainChasing(t, "chase_unsub", func(ctx context.Context, sub bus.Subscription) error {
+		return sub.Unsubscribe(ctx)
+	}, bus.WithAutoDrain(true))
+	assert.True(t, survived, "a message published while Unsubscribe drained was deleted")
+}
+
+// Unsubscribe with auto-drain bumps the metadata version as soon as it
+// expires the subscription, not only once the drain is over: until then a
+// publisher's cached lookups would keep delivering to it.
+func TestUnsubscribeWithAutoDrainBumpsTheVersionBeforeItDrains(t *testing.T) {
+	cleanupAllTables()
+	ctx := context.Background()
+	dialect, err := pgbus.NewDialect(db)
+	require.NoError(t, err)
+	b, err := bus.New(dialect)
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+	sub, err := b.Queue("bump").Subscribe(ctx, "bump.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "bump.topic", 1500)
+	before, err := dialect.GetMetadata(ctx)
+	require.NoError(t, err)
+
+	blocker := holdJob(t, "bump", 1200) // a job of the second batch
+	done := make(chan error, 1)
+	go func() { done <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+
+	during, err := dialect.GetMetadata(ctx)
+	require.NoError(t, err)
+	require.NoError(t, blocker.Rollback())
+	require.NoError(t, recv(t, done))
+	assert.Greater(t, during.Version, before.Version, "the version was not bumped while the drain ran")
+}
+
+// An Unsubscribe that waits for a Subscribe replacing the subscription (other
+// options) unsubscribes the new one, as if it came right after: its jobs are
+// drained. PostgreSQL rechecks only the row an UPDATE waited for, so the
+// first UPDATE finds the old row gone and does not see the new one.
+func TestUnsubscribeAfterAWaitedForSubscribeStillUnsubscribes(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("swap")
+	sub, err := q.Subscribe(ctx, "swap.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "swap.topic", 10)
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = q.Subscribe(bussql.NewContext(ctx, tx), "swap.topic", bus.WithAutoDrain(true), bus.WithTTL(time.Minute))
+	require.NoError(t, err)
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond, "the Unsubscribe waits for the Subscribe")
+	require.NoError(t, tx.Commit())
+	require.NoError(t, recv(t, unsubscribed))
+
+	assert.Empty(t, mustSubscriptions(t, q), "the new subscription is unsubscribed")
+	assert.Equal(t, 0, queueJobs(t, "swap"), "the old subscription's jobs are drained")
+}
+
+// Two drains of a subscription's jobs go one batch at a time: a drain that
+// gives up mid-batch rolls back the jobs it had locked, and the other drain,
+// which waited for it, deletes them. Without that, the other one skipped them
+// as being performed, finished, and soft-deleted the subscription, and the
+// rolled-back jobs stayed for good.
+func TestConcurrentDrainsLeaveNoJobWhenOneGivesUp(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("twice")
+	sub, err := q.Subscribe(ctx, "twice.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "twice.topic", 1500)
+	blocker := holdJob(t, "twice", 999) // the last job of the first batch
+
+	ctxA, cancelA := context.WithCancel(ctx)
+	defer cancelA()
+	drained := make(chan error, 1)
+	go func() { _, err := sub.Drain(ctxA); drained <- err }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond, "the first drain holds its batch")
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	finishedFirst := false
+	require.Eventually(t, func() bool {
+		if len(unsubscribed) > 0 {
+			finishedFirst = true
+			return true
+		}
+		return lockWaiting(t) >= 2
+	}, 10*time.Second, 5*time.Millisecond)
+
+	cancelA()
+	require.Error(t, recv(t, drained))
+	require.NoError(t, blocker.Commit())
+	require.NoError(t, recv(t, unsubscribed))
+
+	assert.False(t, finishedFirst, "the Unsubscribe finished while the first drain still held its batch")
+	assert.Empty(t, mustSubscriptions(t, q))
+	assert.Equal(t, 0, queueJobs(t, "twice"), "the jobs the first drain rolled back are drained")
+}
+
+// A Subscribe with the same options, in a transaction that began before an
+// auto-drain Unsubscribe and queued behind it on the row, makes a new
+// subscription rather than hand back the one being removed: the Unsubscribe
+// expires it to the epoch, not to its own NOW(), which is later than the
+// Subscribe's transaction's.
+func TestSubscribeInAnOlderTransactionQueuedBehindAnUnsubscribe(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("epoch")
+	subscribe := func(ctx context.Context) (bus.Subscription, error) {
+		return q.Subscribe(ctx, "epoch.topic", bus.WithAutoDrain(true))
+	}
+	sub, err := subscribe(ctx)
+	require.NoError(t, err)
+	publishMany(t, b, "epoch.topic", 5)
+
+	older, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = older.Rollback() }()
+	_, err = older.Exec(`SELECT 1`) // its NOW() is fixed from here
+	require.NoError(t, err)
+	time.Sleep(50 * time.Millisecond)
+
+	holder, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = holder.Rollback() }()
+	_, err = holder.Exec(`SELECT id FROM gobus_subscriptions WHERE queue = 'epoch' AND deleted_at IS NULL FOR UPDATE`)
+	require.NoError(t, err)
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+	subscribed := make(chan error, 1)
+	go func() { _, err := subscribe(bussql.NewContext(ctx, older)); subscribed <- err }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, holder.Commit())
+	require.NoError(t, recv(t, subscribed))
+	require.NoError(t, older.Commit())
+	require.NoError(t, recv(t, unsubscribed))
+
+	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe leaves a live subscription")
+}
+
+// An Unsubscribe without auto-drain soft-deletes the subscription in one
+// transaction, keeping its jobs: it is not left expired but undeleted.
+func TestUnsubscribeWithoutAutoDrainDeletesAtOnce(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("plain")
+	sub, err := q.Subscribe(ctx, "plain.topic")
+	require.NoError(t, err)
+	publishMany(t, b, "plain.topic", 3)
+	require.NoError(t, sub.Unsubscribe(ctx))
+
+	var live int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM gobus_subscriptions WHERE queue = 'plain' AND deleted_at IS NULL`).Scan(&live))
+	assert.Zero(t, live)
+	assert.Equal(t, 3, queueJobs(t, "plain"), "without auto-drain the jobs stay")
+}
+
+// recv receives from ch, failing the test rather than hanging if nothing
+// comes, as when the code a test guards is broken.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing received in 10s")
+		panic("unreachable")
+	}
+}

@@ -320,3 +320,39 @@ func TestTransaction_WithDisableSavepoint_NestedError(t *testing.T) {
 	require.NoError(t, err, "Query should not error")
 	assert.Equal(t, 0, count, "Should have 0 users since transaction was rolled back")
 }
+
+// With savepoints disabled, a nested transaction that fails is not rolled
+// back on its own: when the outer one goes on and commits, the nested write
+// stays. (With a savepoint it would be rolled back; this tells the two apart.)
+func TestTransaction_WithDisableSavepoint_NestedErrorIsNotRolledBack(t *testing.T) {
+	db := setupTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+		nestedErr := bussql.Transaction(ctx, tx, func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "Nested", 100)
+			if err != nil {
+				return err
+			}
+			return errors.New("nested error")
+		}, bussql.WithDisableSavepoint())
+		require.Error(t, nestedErr, "the nested transaction's error is returned")
+
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "Outer", 200)
+		return err
+	})
+	require.NoError(t, err, "the outer transaction commits")
+
+	var names []string
+	rows, err := db.QueryContext(ctx, "SELECT name FROM users ORDER BY name")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		names = append(names, name)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"Nested", "Outer"}, names, "without a savepoint the nested write is kept")
+}

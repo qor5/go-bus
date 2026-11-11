@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -258,5 +259,58 @@ func TestFreshFlightsCallerGetsItsOwnDeadline(t *testing.T) {
 		_, err := f.do(ctx, "k", hang)
 		cancel()
 		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+}
+
+// Callers that come as a waiting call's deadline passes (thousands of its
+// callers share that deadline) get a call that ends on their own terms: one
+// with a fine ctx never gets the expired call's error. This reaches the
+// branches where the call's timer fires as a caller joins it.
+func TestFreshFlightsLateCallersAroundADeadline(t *testing.T) {
+	for range 20 {
+		var f freshFlights
+		release := make(chan struct{})
+		running := make(chan struct{})
+		go func() {
+			_, _ = f.do(context.Background(), "k", func(context.Context) (any, error) {
+				close(running)
+				<-release
+				return "first", nil
+			})
+		}()
+		<-running
+		quick := func(ctx context.Context) (any, error) {
+			select {
+			case <-time.After(200 * time.Microsecond):
+				return "ok", nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		var early sync.WaitGroup
+		for range 3000 {
+			early.Go(func() { _, _ = f.do(ctx, "k", quick) })
+		}
+		deadline, _ := ctx.Deadline()
+		time.Sleep(time.Until(deadline) - 300*time.Microsecond)
+		var late sync.WaitGroup
+		for i := range 400 {
+			late.Go(func() {
+				ctx, cancel := context.Background(), context.CancelFunc(func() {})
+				if i%2 == 1 {
+					ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+				}
+				defer cancel()
+				if _, err := f.do(ctx, "k", quick); err != nil {
+					t.Errorf("a late caller with a fine ctx got %v", err)
+				}
+			})
+			time.Sleep(time.Duration(i%3) * time.Microsecond)
+		}
+		close(release)
+		early.Wait()
+		late.Wait()
+		cancel()
 	}
 }

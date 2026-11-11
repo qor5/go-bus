@@ -7,16 +7,17 @@ package quex
 import (
 	"context"
 	"log/slog"
-	"slices"
 
 	"github.com/cenkalti/backoff/v5"
+	"github.com/pkg/errors"
 	"github.com/qor5/go-que"
 	"github.com/qor5/go-que/supervisor"
 )
 
 var (
 	// ErrReconnectBackOffStopped is supervisor.ErrReconnectBackOffStopped
-	// (the same value, so errors.Is matches either).
+	// (the same value, so errors.Is matches either). Assigning to it has no
+	// effect on what workers return.
 	ErrReconnectBackOffStopped = supervisor.ErrReconnectBackOffStopped
 
 	// DefaultReconnectBackOffFactory generates the default reconnection
@@ -52,14 +53,17 @@ func WithOnStop(fn func(err error)) StartWorkerOption {
 
 // StartWorker is supervisor.StartWorker, except that without a reconnect
 // backoff it uses this package's DefaultReconnectBackOffFactory, as it did.
+// It applies each option once, and none when ctx is already done, as before.
 func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options ...StartWorkerOption) (WorkerController, error) {
-	opts := &StartWorkerOptions{}
+	if ctx.Err() != nil {
+		return nil, errors.WithStack(ctx.Err())
+	}
+	opts := StartWorkerOptions{}
 	for _, option := range options {
-		option(opts)
+		option(&opts)
 	}
 	if opts.ReconnectBackOff == nil {
-		// clip first: appending must not write into the caller's slice
-		options = append(slices.Clip(options), supervisor.WithReconnectBackOff(DefaultReconnectBackOffFactory()))
+		opts.ReconnectBackOff = DefaultReconnectBackOffFactory()
 	}
-	return supervisor.StartWorker(ctx, workerOptions, options...)
+	return supervisor.StartWorker(ctx, workerOptions, func(o *StartWorkerOptions) { *o = opts })
 }

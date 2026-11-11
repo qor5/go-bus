@@ -270,3 +270,31 @@ func TestStartWorker_DoesNotWriteIntoTheCallersOptions(t *testing.T) {
 	require.NoError(t, ctrl.Stop(ctx))
 	require.Nil(t, opts[:2][1], "StartWorker wrote into the spare capacity of the caller's slice")
 }
+
+// StartWorker applies each option once, as before, and none when ctx is
+// already done.
+func TestStartWorker_AppliesEachOptionOnce(t *testing.T) {
+	var calls int
+	counting := func(*quex.StartWorkerOptions) { calls++ }
+	wo := que.WorkerOptions{
+		Queue:                     "test-queue",
+		Mutex:                     idleMutex{},
+		Perform:                   noopPerform,
+		MaxLockPerSecond:          100,
+		MaxPerformPerSecond:       100,
+		MaxConcurrentPerformCount: 1,
+	}
+
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := quex.StartWorker(done, wo, counting)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 0, calls, "options applied although ctx was done")
+
+	ctrl, err := quex.StartWorker(context.Background(), wo, counting)
+	require.NoError(t, err)
+	ctx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStop()
+	require.NoError(t, ctrl.Stop(ctx))
+	require.Equal(t, 1, calls, "each option must be applied once")
+}

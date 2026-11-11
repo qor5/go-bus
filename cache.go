@@ -144,7 +144,7 @@ func txOf(ctx context.Context) *sql.Tx {
 // on, and returns the version it read.
 func (c *cacheDialect) checkVersion(ctx context.Context) (int64, error) {
 	val, err := c.flights.do(withoutTx(ctx), "checkVersion", func(ctx context.Context) (any, error) {
-		meta, err := c.Dialect.GetMetadata(ctx)
+		meta, err := c.GetMetadata(ctx)
 		if err != nil {
 			return int64(0), errors.Wrap(err, "failed to get metadata")
 		}
@@ -231,7 +231,7 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 // version the transaction reads is the cached one; what it reads itself is
 // not cached, as it may include the transaction's uncommitted changes.
 func (c *cacheDialect) bySubjectInTx(ctx context.Context, subject string) ([]Subscription, error) {
-	meta, err := c.Dialect.GetMetadata(ctx)
+	meta, err := c.GetMetadata(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get metadata")
 	}

@@ -7,6 +7,7 @@ package quex
 import (
 	"context"
 	"log/slog"
+	"slices"
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/qor5/go-que"
@@ -57,7 +58,8 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 		option(opts)
 	}
 	if opts.ReconnectBackOff == nil {
-		options = append(options, supervisor.WithReconnectBackOff(DefaultReconnectBackOffFactory()))
+		// clip first: appending must not write into the caller's slice
+		options = append(slices.Clip(options), supervisor.WithReconnectBackOff(DefaultReconnectBackOffFactory()))
 	}
 	return supervisor.StartWorker(ctx, workerOptions, options...)
 }

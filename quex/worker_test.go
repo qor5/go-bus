@@ -250,3 +250,23 @@ func TestQuexForwardsToSupervisor(t *testing.T) {
 	}
 	require.ErrorIs(t, ctrl.Err(), quex.ErrReconnectBackOffStopped)
 }
+
+// StartWorker leaves the caller's options alone: adding the default backoff
+// must not write into spare capacity of the slice passed with opts...
+func TestStartWorker_DoesNotWriteIntoTheCallersOptions(t *testing.T) {
+	opts := make([]quex.StartWorkerOption, 1, 4)
+	opts[0] = quex.WithOnStop(func(error) {})
+	ctrl, err := quex.StartWorker(context.Background(), que.WorkerOptions{
+		Queue:                     "test-queue",
+		Mutex:                     idleMutex{},
+		Perform:                   noopPerform,
+		MaxLockPerSecond:          100,
+		MaxPerformPerSecond:       100,
+		MaxConcurrentPerformCount: 1,
+	}, opts...)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, ctrl.Stop(ctx))
+	require.Nil(t, opts[:2][1], "StartWorker wrote into the spare capacity of the caller's slice")
+}

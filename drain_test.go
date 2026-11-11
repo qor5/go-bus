@@ -9,6 +9,7 @@ import (
 
 	"github.com/qor5/go-bus"
 	"github.com/qor5/go-bus/bussql"
+	"github.com/qor5/go-bus/pgbus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -325,4 +326,33 @@ func TestUnsubscribeLeavesJobsPublishedWhileItDrains(t *testing.T) {
 		return sub.Unsubscribe(ctx)
 	}, bus.WithAutoDrain(true))
 	assert.True(t, survived, "a message published while Unsubscribe drained was deleted")
+}
+
+// Unsubscribe with auto-drain bumps the metadata version as soon as it
+// expires the subscription, not only once the drain is over: until then a
+// publisher's cached lookups would keep delivering to it.
+func TestUnsubscribeWithAutoDrainBumpsTheVersionBeforeItDrains(t *testing.T) {
+	cleanupAllTables()
+	ctx := context.Background()
+	dialect, err := pgbus.NewDialect(db)
+	require.NoError(t, err)
+	b, err := bus.New(dialect)
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+	sub, err := b.Queue("bump").Subscribe(ctx, "bump.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "bump.topic", 1500)
+	before, err := dialect.GetMetadata(ctx)
+	require.NoError(t, err)
+
+	blocker := holdJob(t, "bump", 1200) // a job of the second batch
+	done := make(chan error, 1)
+	go func() { done <- sub.Unsubscribe(ctx) }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
+
+	during, err := dialect.GetMetadata(ctx)
+	require.NoError(t, err)
+	require.NoError(t, blocker.Rollback())
+	require.NoError(t, <-done)
+	assert.Greater(t, during.Version, before.Version, "the version was not bumped while the drain ran")
 }

@@ -488,19 +488,42 @@ func (d *Dialect) delete(ctx context.Context, queue, pattern string) error {
 	// First expire the subscription: a lookup in the database no longer
 	// matches it, Heartbeat cannot revive it, and a Subscribe replaces it
 	// rather than return it (the epoch, not NOW(): a Subscribe that waited
-	// for this row compares with its own, earlier NOW()). If the drain then
-	// fails, the subscription stays expired and calling Unsubscribe again
-	// finishes it. The metadata version is bumped once, by the soft delete.
+	// for this row compares with its own, earlier NOW()). The metadata
+	// version is bumped with it, so publishers' cached lookups stop matching
+	// it too. A subscription without auto-drain is soft-deleted in the same
+	// transaction, as before. One with auto-drain is then drained and
+	// soft-deleted in batches (unsubscribeInBatches); if that fails, it stays
+	// expired, receiving nothing, with its remaining jobs, and calling
+	// Unsubscribe on it again (or UnsubscribeExpired) finishes it.
 	var id int64
-	err := bussql.FromContext(ctx, d.db).QueryRowContext(ctx,
-		`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
-		 WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
-		 RETURNING id`, queue, pattern).Scan(&id)
+	var autoDrain bool
+	err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var optionsData []byte
+		err := tx.QueryRowContext(ctx,
+			`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
+			 WHERE queue = $1 AND pattern = $2 AND deleted_at IS NULL
+			 RETURNING id, options`, queue, pattern).Scan(&id, &optionsData)
+		if err != nil {
+			return err
+		}
+		var options bus.SubscribeOptions
+		autoDrain = json.Unmarshal(optionsData, &options) == nil && options.AutoDrain
+		if !autoDrain {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE gobus_subscriptions SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1`, id); err != nil {
+				return errors.Wrap(err, "failed to soft delete subscription")
+			}
+		}
+		return d.updateMetadata(ctx, tx)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // deleting a subscription that does not exist succeeds
 	}
 	if err != nil {
 		return errors.Wrap(err, "failed to expire subscription")
+	}
+	if !autoDrain {
+		return nil
 	}
 	_, err = d.unsubscribeInBatches(ctx, "id = $1", id)
 	return err

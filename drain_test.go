@@ -479,3 +479,21 @@ func TestSubscribeInAnOlderTransactionQueuedBehindAnUnsubscribe(t *testing.T) {
 
 	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe leaves a live subscription")
 }
+
+// An Unsubscribe without auto-drain soft-deletes the subscription in one
+// transaction, keeping its jobs: it is not left expired but undeleted.
+func TestUnsubscribeWithoutAutoDrainDeletesAtOnce(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("plain")
+	sub, err := q.Subscribe(ctx, "plain.topic")
+	require.NoError(t, err)
+	publishMany(t, b, "plain.topic", 3)
+	require.NoError(t, sub.Unsubscribe(ctx))
+
+	var live int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM gobus_subscriptions WHERE queue = 'plain' AND deleted_at IS NULL`).Scan(&live))
+	assert.Zero(t, live)
+	assert.Equal(t, 3, queueJobs(t, "plain"), "without auto-drain the jobs stay")
+}

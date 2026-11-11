@@ -751,7 +751,7 @@ func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern
 			SELECT id FROM batch WHERE pg_try_advisory_xact_lock(id)
 		), deleted AS (
 			DELETE FROM goque_jobs
-			WHERE id IN (SELECT id FROM locked)
+			WHERE id = ANY(ARRAY(SELECT id FROM locked)) -- not IN: stale statistics made that a nested loop over the table
 			  AND done_at IS NULL AND expired_at IS NULL AND retry_count = 0
 			RETURNING id
 		)

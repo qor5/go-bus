@@ -146,9 +146,16 @@ go func() {
     ticker := time.NewTicker(1 * time.Minute)
     defer ticker.Stop()
     for range ticker.C {
-        if err := sub.Heartbeat(ctx); err != nil {
-            // ErrSubscriptionNotFound: it expired (a heartbeat came too late);
-            // subscribe again, or this instance receives nothing more
+        err := sub.Heartbeat(ctx)
+        if errors.Is(err, bus.ErrSubscriptionNotFound) {
+            // it expired (a heartbeat came too late): subscribe again, or this
+            // instance receives nothing more; sub then heartbeats and
+            // unsubscribes the new one (same queue and pattern)
+            _, err = podQueue.Subscribe(ctx, "cache.invalidate.>",
+                bus.WithTTL(5*time.Minute),
+                bus.WithAutoDrain(true))
+        }
+        if err != nil {
             log.Printf("heartbeat: %v", err)
         }
     }

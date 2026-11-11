@@ -114,9 +114,10 @@ const UnsubscribeExpiredLimit = 100
 // periodically; nothing else removes expired subscriptions. Draining a long
 // queue takes a while, and every instance's call waits on the same one, so
 // call it from a goroutine of its own, with a timeout, not from a heartbeat
-// loop; a call cut short is finished by the next one. A subscription whose
-// drain cannot finish a batch within a call's timeout stays first in line
-// and holds back the ones after it. It returns how many it unsubscribed; with an error, how
+// loop; a call cut short is finished by the next one. Give it a timeout
+// that leaves room for at least one batch of the drain (1000 jobs): a
+// subscription whose drain cannot finish a batch within it stays first in
+// line and holds back the ones after it. It returns how many it unsubscribed; with an error, how
 // many it had unsubscribed before it (one whose last batch committed as the
 // error came may be missing). A subscription that a Subscribe to the same
 // queue and pattern replaces while it is being drained is not counted,

@@ -525,3 +525,43 @@ func TestUnsubscribeExpiredWaitsATTLAfterTheExpiry(t *testing.T) {
 	assert.Equal(t, 1, n)
 	assert.Zero(t, pendingJobs(t, "late"))
 }
+
+// The call looks for subscriptions past their grace, so ones still within it
+// (a long TTL, an earlier expiry) do not take its places.
+func TestUnsubscribeExpiredLooksPastTheOnesInTheirGrace(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+	d, err := pgbus.NewDialect(db)
+	require.NoError(t, err)
+	_, err = b.Queue("graced").Subscribe(ctx, "graced.topic", bus.WithTTL(24*time.Hour))
+	require.NoError(t, err)
+	_, err = b.Queue("due").Subscribe(ctx, "due.topic", bus.WithTTL(time.Minute))
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '2 hours' WHERE queue = 'graced'`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() - INTERVAL '1 hour' WHERE queue = 'due'`)
+	require.NoError(t, err)
+
+	n, err := d.UnsubscribeExpired(ctx, 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Zero(t, liveSubscriptions(t, "due"))
+	assert.Equal(t, 1, liveSubscriptions(t, "graced"))
+}
+
+// Unsubscribing one without auto-drain bumps the metadata version, as
+// Unsubscribe does.
+func TestUnsubscribeExpiredBumpsTheVersion(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+	_, err := b.Queue("bump").Subscribe(ctx, "bump.topic", bus.WithTTL(time.Minute))
+	require.NoError(t, err)
+	expire(t, "bump")
+	var before, after int64
+	require.NoError(t, db.QueryRow(`SELECT version FROM gobus_metadata`).Scan(&before))
+	n, err := unsubscribeExpired(ctx, b)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.NoError(t, db.QueryRow(`SELECT version FROM gobus_metadata`).Scan(&after))
+	assert.Greater(t, after, before)
+}

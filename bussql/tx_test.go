@@ -7,26 +7,11 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/pkg/errors"
 	"github.com/qor5/go-bus/bussql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func setupTestDB(t *testing.T) *sql.DB {
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, balance INTEGER)`)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return db
-}
 
 func TestTransaction_Basic(t *testing.T) {
 	db := setupTestDB(t)
@@ -35,7 +20,7 @@ func TestTransaction_Basic(t *testing.T) {
 	ctx := context.Background()
 
 	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "Alice", 100)
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "Alice", 100)
 		return err
 	})
 
@@ -54,7 +39,7 @@ func TestTransaction_Rollback(t *testing.T) {
 	ctx := context.Background()
 
 	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "Bob", 200)
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "Bob", 200)
 		if err != nil {
 			return err
 		}
@@ -76,13 +61,13 @@ func TestTransaction_Nested(t *testing.T) {
 	ctx := context.Background()
 
 	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "Charlie", 300)
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "Charlie", 300)
 		if err != nil {
 			return err
 		}
 
 		err = bussql.Transaction(ctx, tx, func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "David", 400)
+			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "David", 400)
 			if err != nil {
 				return err
 			}
@@ -93,7 +78,7 @@ func TestTransaction_Nested(t *testing.T) {
 			t.Fatal("expected nested transaction to fail")
 		}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "Eve", 500)
+		_, err = tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "Eve", 500)
 		return err
 	})
 
@@ -127,20 +112,20 @@ func TestTransaction_NestedSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User1", 100)
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User1", 100)
 		if err != nil {
 			return err
 		}
 
 		err = bussql.Transaction(ctx, tx, func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User2", 200)
+			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User2", 200)
 			return err
 		})
 		if err != nil {
 			return err
 		}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User3", 300)
+		_, err = tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User3", 300)
 		return err
 	})
 
@@ -159,7 +144,7 @@ func TestTransaction_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "CancelUser", 100)
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "CancelUser", 100)
 		if err != nil {
 			return err
 		}
@@ -192,7 +177,7 @@ func TestTransaction_WithContextExecutor(t *testing.T) {
 
 		// Insert using the executor from context
 		exec := bussql.FromContext(ctx, db)
-		_, err := exec.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "ContextUser", 100)
+		_, err := exec.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "ContextUser", 100)
 		return err
 	})
 
@@ -200,7 +185,7 @@ func TestTransaction_WithContextExecutor(t *testing.T) {
 
 	// Verify the insert was committed
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE name = ?", "ContextUser").Scan(&count)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE name = $1", "ContextUser").Scan(&count)
 	require.NoError(t, err, "Query should not error")
 	assert.Equal(t, 1, count, "Should have 1 user inserted")
 }
@@ -214,7 +199,7 @@ func TestTransaction_NestedWithContextPropagation(t *testing.T) {
 	// Simulate a service function that uses FromContext
 	insertUser := func(ctx context.Context, db *sql.DB, name string, balance int) error {
 		exec := bussql.FromContext(ctx, db)
-		_, err := exec.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", name, balance)
+		_, err := exec.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", name, balance)
 		return err
 	}
 
@@ -274,21 +259,21 @@ func TestTransaction_WithDisableSavepoint(t *testing.T) {
 
 	// With savepoint disabled, nested transaction errors affect the entire transaction
 	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User1", 100)
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User1", 100)
 		if err != nil {
 			return err
 		}
 
 		// Nested transaction without savepoint
 		err = bussql.Transaction(ctx, tx, func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User2", 200)
+			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User2", 200)
 			return err
 		}, bussql.WithDisableSavepoint())
 		if err != nil {
 			return err
 		}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User3", 300)
+		_, err = tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User3", 300)
 		return err
 	})
 
@@ -309,14 +294,14 @@ func TestTransaction_WithDisableSavepoint_NestedError(t *testing.T) {
 
 	// With savepoint disabled, nested transaction error will propagate up
 	err := bussql.Transaction(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User1", 100)
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User1", 100)
 		if err != nil {
 			return err
 		}
 
 		// Nested transaction without savepoint - error will propagate
 		err = bussql.Transaction(ctx, tx, func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES (?, ?)", "User2", 200)
+			_, err := tx.ExecContext(ctx, "INSERT INTO users (name, balance) VALUES ($1, $2)", "User2", 200)
 			if err != nil {
 				return err
 			}

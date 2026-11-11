@@ -709,6 +709,10 @@ func lastJobIDInTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	return id, nil
 }
 
+// drainLockClass is the first key of the advisory lock that drains of one
+// queue and pattern take, one batch at a time ("gbus").
+const drainLockClass = 0x67627573
+
 // drainBatch bounds the jobs one drain statement deletes, and so the advisory
 // locks one transaction takes: draining a long queue in one statement can run
 // out of lock table memory.
@@ -722,6 +726,17 @@ const drainBatch = 1000
 // are repeated on the DELETE, which is all PostgreSQL rechecks on a row a
 // worker changed after the batch was read.
 func (d *Dialect) drainBatchInTx(ctx context.Context, tx *sql.Tx, queue, pattern string, after, upTo int64) (picked, deleted int, last int64, err error) {
+	// One batch of queue and pattern at a time: a batch skips the jobs whose
+	// advisory lock is held, which are a worker's, but would also skip those
+	// of another drain's batch, and if that one rolled back (a deadline),
+	// this drain could finish and soft-delete the subscription with them
+	// left behind for good. Waiting for it instead, this batch sees them
+	// again once it rolls back. A two-key lock, so it cannot be a job's; two
+	// queues and patterns whose hashes collide only wait for each other.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1, hashtext($2 || chr(1) || $3))`,
+		drainLockClass, queue, pattern); err != nil {
+		return 0, 0, 0, errors.Wrap(err, "failed to wait for another drain")
+	}
 	var lastID sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
 		WITH batch AS (

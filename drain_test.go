@@ -63,7 +63,7 @@ func TestDrainLocksOnlyTheJobsItDeletes(t *testing.T) {
 			defer func() { _ = tx.Rollback() }()
 			require.NoError(t, drain(t, bussql.NewContext(ctx, tx), sub))
 			var locks int
-			require.NoError(t, tx.QueryRow(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()`).Scan(&locks))
+			require.NoError(t, tx.QueryRow(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 AND pid = pg_backend_pid()`).Scan(&locks))
 			assert.Equal(t, 10, locks, "a lock per deleted job")
 			require.NoError(t, tx.Commit())
 			assert.Equal(t, 300, queueJobs(t, "locks"))
@@ -392,4 +392,46 @@ func TestUnsubscribeAfterAWaitedForSubscribeStillUnsubscribes(t *testing.T) {
 
 	assert.Empty(t, mustSubscriptions(t, q), "the new subscription is unsubscribed")
 	assert.Equal(t, 0, queueJobs(t, "swap"), "the old subscription's jobs are drained")
+}
+
+// Two drains of a subscription's jobs go one batch at a time: a drain that
+// gives up mid-batch rolls back the jobs it had locked, and the other drain,
+// which waited for it, deletes them. Without that, the other one skipped them
+// as being performed, finished, and soft-deleted the subscription, and the
+// rolled-back jobs stayed for good.
+func TestConcurrentDrainsLeaveNoJobWhenOneGivesUp(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	defer func() { _ = b.Close() }()
+	ctx := context.Background()
+	q := b.Queue("twice")
+	sub, err := q.Subscribe(ctx, "twice.topic", bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishMany(t, b, "twice.topic", 1500)
+	blocker := holdJob(t, "twice", 999) // the last job of the first batch
+
+	ctxA, cancelA := context.WithCancel(ctx)
+	defer cancelA()
+	drained := make(chan error, 1)
+	go func() { _, err := sub.Drain(ctxA); drained <- err }()
+	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond, "the first drain holds its batch")
+
+	unsubscribed := make(chan error, 1)
+	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
+	finishedFirst := false
+	require.Eventually(t, func() bool {
+		if len(unsubscribed) > 0 {
+			finishedFirst = true
+			return true
+		}
+		return lockWaiting(t) >= 2
+	}, 10*time.Second, 5*time.Millisecond)
+
+	cancelA()
+	require.Error(t, <-drained)
+	require.NoError(t, blocker.Commit())
+	require.NoError(t, <-unsubscribed)
+
+	assert.False(t, finishedFirst, "the Unsubscribe finished while the first drain still held its batch")
+	assert.Empty(t, mustSubscriptions(t, q))
+	assert.Equal(t, 0, queueJobs(t, "twice"), "the jobs the first drain rolled back are drained")
 }

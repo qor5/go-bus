@@ -3,6 +3,7 @@ package bus
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"runtime/pprof"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/qor5/go-bus/bussql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -148,4 +150,74 @@ func recv[T any](t *testing.T, ch <-chan T) T {
 		t.Fatal("nothing received in 10s")
 		panic("unreachable")
 	}
+}
+
+// uncommittedSub stands for a subscription a transaction made and has not
+// committed.
+type uncommittedSub struct{ Subscription }
+
+func (uncommittedSub) ExpiresAt() time.Time { return time.Time{} }
+
+// inTxDialect reads, in a transaction, a subscription that transaction made
+// (another goroutine sharing it subscribed between this caller's reads), and
+// outside one, what is committed: nothing.
+type inTxDialect struct{ Dialect }
+
+func (inTxDialect) GetMetadata(context.Context) (*Metadata, error) {
+	return &Metadata{Version: 7}, nil
+}
+
+func (inTxDialect) BySubject(ctx context.Context, _ string) ([]Subscription, error) {
+	if txOf(ctx) != nil {
+		return []Subscription{uncommittedSub{}}, nil
+	}
+	return []Subscription{}, nil
+}
+
+// keyCache is a map Cache that keeps what was set until the test ends.
+type keyCache struct {
+	mu sync.Mutex
+	m  map[string][]Subscription
+}
+
+func (c *keyCache) Get(k string) ([]Subscription, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.m[k]
+	return v, ok
+}
+
+func (c *keyCache) Set(k string, v []Subscription) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[k] = v
+}
+
+func (c *keyCache) Del(k string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.m, k)
+}
+
+func (c *keyCache) Clear() {}
+
+// What a lookup reads in a transaction is never cached, even under the
+// version last read outside one: goroutines sharing the transaction can
+// change the subscriptions between its reads, and if it rolls back, the
+// cache would deliver to a subscription that never existed. The cache is
+// filled from outside the transaction instead.
+func TestCachedLookupInATransactionCachesNothingItRead(t *testing.T) {
+	cache := &keyCache{m: map[string][]Subscription{}}
+	c := &cacheDialect{Dialect: inTxDialect{}, cache: cache}
+	atomic.StoreInt64(&c.version, 7)
+
+	ctx := bussql.NewContext(context.Background(), &sql.Tx{})
+	subs, err := c.BySubject(ctx, "a.b")
+	require.NoError(t, err)
+	require.Len(t, subs, 1, "the transaction sees its own subscription")
+
+	require.Eventually(t, func() bool { _, ok := cache.Get(bySubjectKey(7, "a.b")); return ok },
+		time.Second, time.Millisecond, "the cache is filled from outside the transaction")
+	got, _ := cache.Get(bySubjectKey(7, "a.b"))
+	assert.Empty(t, got, "the cache took the transaction's uncommitted subscription")
 }

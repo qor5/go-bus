@@ -122,10 +122,10 @@ func CacheDecorator(cache Cache) DialectDecorator {
 // cacheDialect caches subscription lookups by subject
 type cacheDialect struct {
 	Dialect
-	cache      Cache
-	flights    freshFlights
-	version    int64 // Database version, accessed atomically
-	refreshing int32 // a background version check runs, accessed atomically
+	cache   Cache
+	flights freshFlights
+	version int64    // Database version, accessed atomically
+	filling sync.Map // subjects a background lookup runs for
 }
 
 // withoutTx drops the caller's transaction from ctx, for a call that callers
@@ -230,56 +230,47 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 // could wait forever for one when such callers use up the pool, and would
 // not see the transaction's own changes.
 //
-// The cache serves it, and takes what it reads, while the version the
-// transaction reads is the one last read outside any transaction
-// (c.version): then the transaction has not changed the subscriptions,
-// since a change bumps that version on the same row, which nobody else can
-// commit a bump of while the transaction holds it uncommitted. (A Heartbeat
-// in it, which does not bump the version, may leave a later expiry in the
-// cache if the transaction rolls back.) If c.version is another one, a check
-// outside the transaction is started in the background, so that callers
-// who only publish in transactions get the cache too.
+// The cache serves it while the version the transaction reads is the one
+// last read outside any transaction (c.version): then the transaction has
+// not bumped it, which every change of the subscriptions does on the same
+// row. What it reads itself is never cached: goroutines sharing the
+// transaction can change the subscriptions between its reads, and if the
+// transaction rolls back, the cache would deliver to a subscription that
+// never existed. Instead, on a miss, a lookup outside the transaction fills
+// the cache in the background, so that callers who only publish in
+// transactions (an outbox) get the cache too.
 func (c *cacheDialect) bySubjectInTx(ctx context.Context, subject string) ([]Subscription, error) {
 	meta, err := c.GetMetadata(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get metadata")
 	}
-	key := bySubjectKey(meta.Version, subject)
-	known := meta.Version == atomic.LoadInt64(&c.version)
-	if known {
-		if subs, found := c.getCachedSubscriptionsIfValid(key); found {
+	if meta.Version == atomic.LoadInt64(&c.version) {
+		if subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(meta.Version, subject)); found {
 			return subs, nil
 		}
-	} else {
-		c.checkVersionInBackground()
 	}
-	subs, err := c.Dialect.BySubject(ctx, subject)
-	if err != nil {
-		return nil, err
-	}
-	if known {
-		c.cache.Set(key, subs)
-	}
-	return subs, nil
+	c.fillInBackground(subject)
+	return c.Dialect.BySubject(ctx, subject)
 }
 
-// checkVersionInBackground starts a version check unless one it started
-// still runs. Nobody waits for it, so it cannot hold a caller in a
-// transaction waiting for a second connection.
-func (c *cacheDialect) checkVersionInBackground() {
-	if !atomic.CompareAndSwapInt32(&c.refreshing, 0, 1) {
+// fillInBackground looks subject up outside any transaction, caching the
+// result, unless such a lookup it started still runs. Nobody waits for it,
+// so it cannot hold a caller in a transaction waiting for a second
+// connection.
+func (c *cacheDialect) fillInBackground(subject string) {
+	if _, running := c.filling.LoadOrStore(subject, struct{}{}); running {
 		return
 	}
 	go func() {
-		defer atomic.StoreInt32(&c.refreshing, 0)
-		ctx, cancel := context.WithTimeout(context.Background(), backgroundCheckTimeout)
+		defer c.filling.Delete(subject)
+		ctx, cancel := context.WithTimeout(context.Background(), backgroundFillTimeout)
 		defer cancel()
-		_, _ = c.checkVersion(ctx)
+		_, _ = c.BySubject(ctx, subject)
 	}()
 }
 
-// backgroundCheckTimeout bounds a version check nobody waits for.
-const backgroundCheckTimeout = 30 * time.Second
+// backgroundFillTimeout bounds a lookup nobody waits for.
+const backgroundFillTimeout = 30 * time.Second
 
 // freshFlights coalesces concurrent calls by key, like singleflight, except
 // that a caller never gets the result of a call that started before it
@@ -350,7 +341,9 @@ func (c *freshCall) wait(ctx context.Context) bool {
 			c.cancel()
 		})
 	} else if !c.timer.Reset(time.Until(d)) {
-		// it fired as we came: the call is cancelled
+		// it fired as we came: the call is cancelled. Reset scheduled it
+		// again all the same; stop that, so it does not keep the call.
+		c.timer.Stop()
 		c.waiters--
 		return false
 	}
@@ -400,6 +393,9 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Conte
 			// rather than share a cancelled call
 			if f.next[key] == call {
 				delete(f.next, key)
+			}
+			if call.timer != nil {
+				call.timer.Stop() // or it keeps the call until its deadline
 			}
 			call.cancel()
 		}

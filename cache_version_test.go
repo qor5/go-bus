@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/qor5/go-bus"
+	"github.com/qor5/go-bus/bussql"
 	"github.com/qor5/go-bus/pgbus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -245,4 +246,25 @@ func TestALookupCachedAfterTheVersionChangedIsNotServed(t *testing.T) {
 		}
 		assert.ElementsMatch(t, []string{"old", "new"}, queues, "publish #%d after the Subscribe", i)
 	}
+}
+
+// A lookup shared among callers does not run on an executor other than a
+// transaction that one of them carries (a *sql.Conn, say): the others would
+// use a connection that is not theirs, and fail with it. Here the connection
+// is closed; the lookup runs on the bus's own database.
+func TestCachedLookupIgnoresAConnectionTheCallerCarries(t *testing.T) {
+	cleanupAllTables()
+	ctx := context.Background()
+	b, err := pgbus.New(db)
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+	_, err = b.Queue("conn").Subscribe(ctx, "conn.topic")
+	require.NoError(t, err)
+
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	subs, err := b.BySubject(bussql.NewContext(ctx, conn), "conn.topic")
+	require.NoError(t, err)
+	assert.Len(t, subs, 1)
 }

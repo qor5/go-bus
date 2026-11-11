@@ -44,7 +44,7 @@ func TestFreshFlightsShareTheNextCall(t *testing.T) {
 	wg.Wait()
 	close(got)
 
-	assert.Equal(t, int64(1), <-first)
+	assert.Equal(t, int64(1), recv(t, first))
 	for v := range got {
 		assert.Equal(t, int64(2), v, "the call after the running one")
 	}
@@ -78,7 +78,7 @@ func TestFreshFlightsDropsACallEveryWaiterLeft(t *testing.T) {
 			return "first", nil
 		})
 	}()
-	<-running
+	recv(t, running)
 
 	// a caller that gives up while waiting for the next call
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,7 +89,7 @@ func TestFreshFlightsDropsACallEveryWaiterLeft(t *testing.T) {
 	}()
 	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
 	cancel()
-	require.ErrorIs(t, <-left, context.Canceled)
+	require.ErrorIs(t, recv(t, left), context.Canceled)
 
 	// a caller arriving now gets a call of its own, not the abandoned one
 	type result struct {
@@ -128,11 +128,24 @@ func TestFreshFlightsCancelsARunningCallEveryWaiterLeft(t *testing.T) {
 	}()
 	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 1 }, time.Second, time.Millisecond)
 	cancel()
-	require.ErrorIs(t, <-waited, context.Canceled)
+	require.ErrorIs(t, recv(t, waited), context.Canceled)
 	select {
 	case err := <-ended:
 		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(time.Second):
 		t.Fatal("the running call was not cancelled after its only caller left")
+	}
+}
+
+// recv receives from ch, failing the test rather than hanging if nothing
+// comes, as when the code a test guards is broken.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing received in 10s")
+		panic("unreachable")
 	}
 }

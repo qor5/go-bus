@@ -3,6 +3,7 @@ package bus_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"runtime/pprof"
 	"strings"
 	"sync"
@@ -81,7 +82,7 @@ func TestCachedPublishSeesASubscriptionCommittedBeforeIt(t *testing.T) {
 	gate.armed = true
 	gate.mu.Unlock()
 	go func() { _, _ = publish() }() // its version check reads the metadata, then waits
-	<-gate.read
+	recv(t, gate.read)
 	_, err = b.Queue("new").Subscribe(ctx, "seen.topic")
 	require.NoError(t, err)
 
@@ -95,7 +96,7 @@ func TestCachedPublishSeesASubscriptionCommittedBeforeIt(t *testing.T) {
 	require.Eventually(t, func() bool { return goroutinesIn("(*cacheDialect).checkVersion(") >= 2 }, 10*time.Second, time.Millisecond)
 	close(gate.release)
 
-	r := <-after
+	r := recv(t, after)
 	require.NoError(t, r.err)
 	var queues []string
 	for _, e := range r.d.Executions {
@@ -155,7 +156,7 @@ func TestCacheMissPublishSeesASubscriptionCommittedBeforeIt(t *testing.T) {
 	gate.armed = true
 	gate.mu.Unlock()
 	go func() { _, _ = publish() }() // version check clears the cache; its lookup reads, then waits
-	<-gate.read
+	recv(t, gate.read)
 	_, err = b.Queue("new").Subscribe(ctx, "miss.topic")
 	require.NoError(t, err)
 
@@ -167,7 +168,7 @@ func TestCacheMissPublishSeesASubscriptionCommittedBeforeIt(t *testing.T) {
 	go func() { d, err := publish(); after <- result{d, err} }()
 	require.Eventually(t, func() bool { return goroutinesIn("(*freshFlights).do(") >= 2 }, 10*time.Second, time.Millisecond)
 	close(gate.release)
-	r := <-after
+	r := recv(t, after)
 	require.NoError(t, r.err)
 	var queues []string
 	for _, e := range r.d.Executions {
@@ -231,13 +232,13 @@ func TestALookupCachedAfterTheVersionChangedIsNotServed(t *testing.T) {
 	gc.armed = true
 	gc.mu.Unlock()
 	go pub("race.topic") // clears, reads [old], passes the version guard, then Set is held
-	<-gc.in
+	recv(t, gc.in)
 	pub("zzz.topic") // caches zzz under the current version
 	_, err = b.Queue("new").Subscribe(ctx, "race.topic")
 	require.NoError(t, err)
 	pub("zzz.topic")  // version check: learns the new version, clears
 	close(gc.release) // the held Set stores the stale list
-	<-gc.stored
+	recv(t, gc.stored)
 
 	for i := 0; i < 3; i++ {
 		var queues []string
@@ -355,4 +356,56 @@ func TestCachedPublishDoesNotKeepARolledBackSubscription(t *testing.T) {
 	var gone int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM goque_jobs WHERE queue = 'rb-gone'`).Scan(&gone))
 	assert.Zero(t, gone, "a publish delivered to a subscription that was rolled back")
+}
+
+// keyRecordingCache records the keys set on a cache.
+type keyRecordingCache struct {
+	bus.Cache
+	mu   sync.Mutex
+	keys []string
+}
+
+func (c *keyRecordingCache) Set(key string, v []bus.Subscription) {
+	c.mu.Lock()
+	c.keys = append(c.keys, key)
+	c.mu.Unlock()
+	c.Cache.Set(key, v)
+}
+
+// A publish in a transaction that changed the subscriptions caches nothing
+// under the version the transaction made: it is not committed, and a cache
+// that is not cleared when the version moves on (one shared by instances,
+// say) would serve it.
+func TestCachedPublishInATransactionDoesNotCacheItsOwnChanges(t *testing.T) {
+	cleanupAllTables()
+	ctx := context.Background()
+	rc, err := bus.NewRistrettoCache(nil)
+	require.NoError(t, err)
+	defer rc.Close()
+	cache := &keyRecordingCache{Cache: bus.WrapRistrettoCache(rc)}
+	b, err := pgbus.New(db, bus.WithMigrate(false), bus.WithCache(cache))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+	publish := func(ctx context.Context) {
+		_, err := b.Publish(ctx, &bus.Outbound{Message: bus.Message{Subject: "own.change", Payload: []byte(`"m"`)}})
+		require.NoError(t, err)
+	}
+	_, err = b.Queue("own-a").Subscribe(ctx, "own.change")
+	require.NoError(t, err)
+	publish(ctx) // the cache knows the version
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = b.Queue("own-b").Subscribe(bussql.NewContext(ctx, tx), "own.change")
+	require.NoError(t, err)
+	var uncommitted int64
+	require.NoError(t, tx.QueryRow(`SELECT version FROM gobus_metadata`).Scan(&uncommitted))
+	publish(bussql.NewContext(ctx, tx))
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for _, key := range cache.keys {
+		assert.False(t, strings.HasPrefix(key, fmt.Sprintf("v%d:", uncommitted)), "cached under the uncommitted version: %s", key)
+	}
 }

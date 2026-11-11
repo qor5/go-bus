@@ -291,49 +291,53 @@ const backgroundCheckTimeout = 30 * time.Second
 // A call runs with the values of the ctx of the caller that started it, but
 // not with its deadline or cancellation: it ends when it returns, when every
 // caller waiting for it has given up, or at the latest deadline among them,
-// a caller without a deadline counting as one of limit after it arrived. So
-// no caller's deadline cuts the call short for another, and a call that
-// hangs (a dead connection) ends within limit of the last caller without a
-// deadline, rather than holding every later caller of the key for good.
+// unless one of them has no deadline, as a call on that caller's own ctx
+// would. So no caller's deadline cuts the call short for another, and a call
+// that hangs (a dead connection) holds nobody past their own deadlines.
 type freshFlights struct {
 	mu      sync.Mutex
 	running map[string]*freshCall
 	next    map[string]*freshCall
-	limit   time.Duration // sharedCallLimit if zero
 }
-
-// sharedCallLimit is how long a caller without a deadline lets a shared call
-// run (a version check or a subscription lookup, a single query each).
-const sharedCallLimit = 10 * time.Second
 
 // errSharedCallTimedOut is what a caller whose own ctx is fine gets from a
 // call that ran past the deadlines of all its callers.
 var errSharedCallTimedOut = errors.Wrap(context.DeadlineExceeded, "shared call ran past the deadlines of its callers")
 
 type freshCall struct {
-	fn       func(context.Context) (any, error)
-	ctx      context.Context
-	cancel   context.CancelFunc
-	waiters  int         // guarded by freshFlights.mu
-	deadline time.Time   // guarded by freshFlights.mu
-	timer    *time.Timer // guarded by freshFlights.mu
-	timedOut atomic.Bool // its deadline ended it
-	done     chan struct{}
-	val      any
-	err      error
+	fn        func(context.Context) (any, error)
+	ctx       context.Context
+	cancel    context.CancelFunc
+	waiters   int         // guarded by freshFlights.mu
+	deadline  time.Time   // guarded by freshFlights.mu
+	unbounded bool        // a caller without a deadline waits for it; guarded by freshFlights.mu
+	timer     *time.Timer // guarded by freshFlights.mu
+	timedOut  atomic.Bool // its deadline ended it
+	done      chan struct{}
+	val       any
+	err       error
 }
 
 // wait counts one more caller waiting for the call and moves the call's
-// deadline to the caller's if that is later, a caller without a deadline
-// counting as one of limit from now. Called with freshFlights.mu held.
-func (c *freshCall) wait(ctx context.Context, limit time.Duration) {
-	c.waiters++
-	d, ok := ctx.Deadline()
-	if !ok {
-		d = time.Now().Add(limit)
+// deadline to the caller's if that is later; a caller without a deadline
+// lifts it. It reports false, counting nobody, if the call's deadline passed
+// already. Called with freshFlights.mu held.
+func (c *freshCall) wait(ctx context.Context) bool {
+	if c.timedOut.Load() {
+		return false
 	}
+	d, ok := ctx.Deadline()
+	if !ok || c.unbounded {
+		if !c.unbounded && c.timer != nil && !c.timer.Stop() {
+			return false // the timer fired as we came
+		}
+		c.unbounded = true
+		c.waiters++
+		return true
+	}
+	c.waiters++
 	if !d.After(c.deadline) {
-		return
+		return true
 	}
 	c.deadline = d
 	if c.timer == nil {
@@ -341,9 +345,12 @@ func (c *freshCall) wait(ctx context.Context, limit time.Duration) {
 			c.timedOut.Store(true)
 			c.cancel()
 		})
-	} else {
-		c.timer.Reset(time.Until(d))
+	} else if !c.timer.Reset(time.Until(d)) {
+		// it fired as we came: the call is cancelled
+		c.waiters--
+		return false
 	}
+	return true
 }
 
 func newFreshCall(ctx context.Context, fn func(context.Context) (any, error)) *freshCall {
@@ -358,9 +365,9 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Conte
 		f.next = map[string]*freshCall{}
 	}
 	call := f.next[key]
-	if call != nil && call.timedOut.Load() {
+	if call != nil && !call.wait(ctx) {
 		// its deadline passed before it started: its callers get that, and
-		// a caller arriving now gets a new call
+		// this caller gets a new call
 		delete(f.next, key)
 		call.err = errSharedCallTimedOut
 		close(call.done)
@@ -369,17 +376,14 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Conte
 	switch {
 	case f.running[key] == nil:
 		call = newFreshCall(ctx, fn)
+		call.wait(ctx)
 		f.running[key] = call
 		go f.run(key, call)
 	case call == nil:
 		call = newFreshCall(ctx, fn)
+		call.wait(ctx)
 		f.next[key] = call
 	}
-	limit := f.limit
-	if limit <= 0 {
-		limit = sharedCallLimit
-	}
-	call.wait(ctx, limit)
 	f.mu.Unlock()
 
 	select {

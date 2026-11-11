@@ -251,10 +251,11 @@ func (c *cacheDialect) bySubjectInTx(ctx context.Context, subject string) ([]Sub
 // every caller arriving meanwhile shares.
 //
 // A call runs with the values of the ctx of the caller that started it, but
-// does not end with that caller: it ends when it returns or when every caller
-// waiting for it has given up, so neither one caller's deadline fails the
-// others nor does a call that hangs (a dead connection) hold later callers
-// once its own have left.
+// does not end with that caller: it ends when it returns, when every caller
+// waiting for it has given up, or at the latest deadline among them. So one
+// caller's deadline does not fail the others, and a call that hangs (a dead
+// connection) neither holds later callers once its own have left nor runs
+// past every deadline because one caller has none.
 type freshFlights struct {
 	mu      sync.Mutex
 	running map[string]*freshCall
@@ -262,13 +263,34 @@ type freshFlights struct {
 }
 
 type freshCall struct {
-	fn      func(context.Context) (any, error)
-	ctx     context.Context
-	cancel  context.CancelFunc
-	waiters int // guarded by freshFlights.mu
-	done    chan struct{}
-	val     any
-	err     error
+	fn       func(context.Context) (any, error)
+	ctx      context.Context
+	cancel   context.CancelFunc
+	waiters  int         // guarded by freshFlights.mu
+	deadline time.Time   // guarded by freshFlights.mu
+	timer    *time.Timer // guarded by freshFlights.mu
+	done     chan struct{}
+	val      any
+	err      error
+}
+
+// wait counts one more caller waiting for the call and moves the call's
+// deadline to the caller's if that is later. A caller without a deadline
+// does not move it: the call then ends at the latest deadline of the others,
+// so it never runs longer than it would have on any one caller's ctx. Called
+// with freshFlights.mu held.
+func (c *freshCall) wait(ctx context.Context) {
+	c.waiters++
+	d, ok := ctx.Deadline()
+	if !ok || !d.After(c.deadline) {
+		return
+	}
+	c.deadline = d
+	if c.timer == nil {
+		c.timer = time.AfterFunc(time.Until(d), c.cancel)
+	} else {
+		c.timer.Reset(time.Until(d))
+	}
 }
 
 func newFreshCall(ctx context.Context, fn func(context.Context) (any, error)) *freshCall {
@@ -283,6 +305,14 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Conte
 		f.next = map[string]*freshCall{}
 	}
 	call := f.next[key]
+	if call != nil && call.ctx.Err() != nil {
+		// its deadline passed before it started: it fails at once, so its
+		// callers get that error, and a caller arriving now gets a new call
+		delete(f.next, key)
+		call.err = call.ctx.Err()
+		close(call.done)
+		call = nil
+	}
 	switch {
 	case f.running[key] == nil:
 		call = newFreshCall(ctx, fn)
@@ -292,7 +322,7 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Conte
 		call = newFreshCall(ctx, fn)
 		f.next[key] = call
 	}
-	call.waiters++
+	call.wait(ctx)
 	f.mu.Unlock()
 
 	select {
@@ -322,6 +352,9 @@ func (f *freshFlights) run(key string, call *freshCall) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if call.timer != nil {
+		call.timer.Stop()
+	}
 	next := f.next[key]
 	delete(f.next, key)
 	if next == nil {

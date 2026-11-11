@@ -92,15 +92,24 @@ func TestFreshFlightsDropsACallEveryWaiterLeft(t *testing.T) {
 	require.ErrorIs(t, <-left, context.Canceled)
 
 	// a caller arriving now gets a call of its own, not the abandoned one
-	got := make(chan any, 1)
+	type result struct {
+		v   any
+		err error
+	}
+	got := make(chan result, 1)
 	go func() {
 		v, err := f.do(context.Background(), "k", func(ctx context.Context) (any, error) { return "fresh", ctx.Err() })
-		require.NoError(t, err)
-		got <- v
+		got <- result{v, err}
 	}()
 	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
 	close(release)
-	assert.Equal(t, "fresh", <-got)
+	select {
+	case r := <-got:
+		require.NoError(t, r.err)
+		assert.Equal(t, "fresh", r.v)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the caller got no result")
+	}
 }
 
 // A running call whose callers have all given up is cancelled.

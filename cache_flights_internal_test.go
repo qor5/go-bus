@@ -314,3 +314,38 @@ func TestFreshFlightsLateCallersAroundADeadline(t *testing.T) {
 		cancel()
 	}
 }
+
+// A waiting call every caller left is dropped with its timer stopped, so the
+// timer does not keep it, and its caller's context, until the deadline.
+func TestFreshFlightsStopsTheTimerOfACallEveryWaiterLeft(t *testing.T) {
+	var f freshFlights
+	release := make(chan struct{})
+	running := make(chan struct{})
+	go func() {
+		_, _ = f.do(context.Background(), "k", func(context.Context) (any, error) {
+			close(running)
+			<-release
+			return "first", nil
+		})
+	}()
+	<-running
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	left := make(chan error, 1)
+	go func() {
+		_, err := f.do(ctx, "k", func(ctx context.Context) (any, error) { return nil, ctx.Err() })
+		left <- err
+	}()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
+	f.mu.Lock()
+	call := f.next["k"]
+	f.mu.Unlock()
+	require.NotNil(t, call)
+	cancel()
+	require.ErrorIs(t, recv(t, left), context.Canceled)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.False(t, call.timer.Stop(), "the dropped call's timer still runs")
+}

@@ -92,8 +92,10 @@ func (d *Dialect) Migrate(ctx context.Context) error {
 var _ bus.ExpiredUnsubscriberDialect = (*Dialect)(nil)
 
 // expiredForATTL holds for a subscription that expired at least its TTL ago
-// (options.ttl is in nanoseconds, as Heartbeat reads it).
-const expiredForATTL = `expires_at <= NOW() - (COALESCE((options->>'ttl')::bigint, 0) / 1000) * INTERVAL '1 microsecond'`
+// (options.ttl is in nanoseconds, as Heartbeat reads it), or that was
+// expired to the epoch, which marks it abandoned (an Unsubscribe, or a call
+// of this, cut short) whatever its TTL.
+const expiredForATTL = `(expires_at = 'epoch' OR expires_at <= NOW() - (COALESCE((options->>'ttl')::bigint, 0) / 1000) * INTERVAL '1 microsecond')`
 
 // UnsubscribeExpired unsubscribes up to limit subscriptions whose TTL ran out
 // (by the database's clock), oldest first, and returns how many. Each is
@@ -183,8 +185,12 @@ func (d *Dialect) unsubscribeExpired(ctx context.Context, id int64) (bool, error
 		var options bus.SubscribeOptions
 		autoDrain = json.Unmarshal(optionsData, &options) == nil && options.AutoDrain
 		if autoDrain {
-			upTo, err = lastJobIDInTx(ctx, tx)
-			return err
+			if upTo, err = lastJobIDInTx(ctx, tx); err != nil {
+				return err
+			}
+			// as Unsubscribe does: publishers' cached lookups stop
+			// matching it before the drain, whatever their clocks
+			return d.updateMetadata(ctx, tx)
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE gobus_subscriptions SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1`, id); err != nil {

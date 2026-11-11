@@ -565,3 +565,42 @@ func TestUnsubscribeExpiredBumpsTheVersion(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT version FROM gobus_metadata`).Scan(&after))
 	assert.Greater(t, after, before)
 }
+
+// A subscription expired to the epoch (an Unsubscribe cut short) is taken at
+// once, whatever its TTL: the epoch marks it abandoned, with no grace.
+func TestUnsubscribeExpiredTakesTheEpochAtOnce(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+	_, err := b.Queue("cut-long").Subscribe(ctx, "cut-long.topic", bus.WithTTL(100*365*24*time.Hour), bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishN(t, b, "cut-long.topic", 3)
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = 'epoch' WHERE queue = 'cut-long'`)
+	require.NoError(t, err)
+
+	n, err := unsubscribeExpired(ctx, b)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Zero(t, pendingJobs(t, "cut-long"))
+}
+
+// The version is bumped as the subscription is expired, before the drain,
+// so that publishers' cached lookups stop matching it while it drains.
+func TestUnsubscribeExpiredBumpsTheVersionBeforeItDrains(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+	_, err := b.Queue("bump-first").Subscribe(ctx, "bump-first.topic", bus.WithTTL(time.Minute), bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishN(t, b, "bump-first.topic", 1500)
+	expire(t, "bump-first")
+	var before, during int64
+	require.NoError(t, db.QueryRow(`SELECT version FROM gobus_metadata`).Scan(&before))
+
+	blocker := lockJob(t, "bump-first", 999)
+	done := make(chan error, 1)
+	go func() { _, err := unsubscribeExpired(ctx, b); done <- err }()
+	waitForLockWaiters(t, 1) // the drain waits on the job
+	require.NoError(t, db.QueryRow(`SELECT version FROM gobus_metadata`).Scan(&during))
+	require.NoError(t, blocker.Commit())
+	require.NoError(t, recv(t, done))
+	assert.Greater(t, during, before, "the version was not bumped before the drain")
+}

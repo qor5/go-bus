@@ -669,9 +669,12 @@ func (s *subscription) Drain(ctx context.Context) (int, error) {
 }
 
 // lastJobIDInTx returns the highest job id, the bound a drain stops at: it
-// deletes the jobs pending when it started, not messages published while it
-// runs, which a drain walking on to the end of the queue would lose (and,
-// with a steady stream of them, never finish).
+// leaves the messages published after it started, which a drain walking on
+// to the end of the queue would delete (and, with a steady stream of them,
+// never finish). Ids are taken in insert order, not commit order, so a job
+// whose transaction began before the drain and commits while it runs, below
+// the bound, may still be deleted by a later batch; a single statement, as
+// before batching, kept it unless it committed before the statement began.
 func lastJobIDInTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	var id int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM goque_jobs`).Scan(&id); err != nil {

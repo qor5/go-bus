@@ -157,6 +157,9 @@ type Subscription interface {
 	// This method is useful for cleaning up the queue without affecting jobs that are already running.
 	// Jobs are deleted in batches, a transaction each, so a failure leaves the batches before it deleted;
 	// inside a transaction the context carries, every batch joins that transaction.
+	// It deletes the jobs whose ids are at most the highest one when it starts, so a
+	// message published after Drain starts is kept; one whose transaction began
+	// before and commits while Drain runs may still be deleted.
 	// Returns the number of jobs that were deleted.
 	Drain(ctx context.Context) (int, error)
 }

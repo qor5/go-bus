@@ -152,7 +152,7 @@ func TestUnsubscribeSparesASubscriptionMadeDuringTheDrain(t *testing.T) {
 	}
 	publishMany(t, b, "again.topic", 1)
 	require.NoError(t, blocker.Commit())
-	require.NoError(t, <-unsubscribed)
+	require.NoError(t, recv(t, unsubscribed))
 
 	assert.Len(t, mustSubscriptions(t, q), 1)
 	assert.Equal(t, 1, queueJobs(t, "again"),
@@ -217,7 +217,7 @@ func TestDrainKeepsAJobRetriedDuringTheDrain(t *testing.T) {
 	go func() { n, err := sub.Drain(ctx); drained <- result{n, err} }()
 	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond)
 	require.NoError(t, worker.Commit())
-	r := <-drained
+	r := recv(t, drained)
 	require.NoError(t, r.err)
 	assert.Equal(t, 2, r.n)
 	assert.Equal(t, 1, queueJobs(t, "retry"), "the retried job is kept")
@@ -246,8 +246,8 @@ func TestSubscribeDuringUnsubscribeKeepsTheSubscription(t *testing.T) {
 	// The Subscribe returns at once, or waits for the batch.
 	require.Eventually(t, func() bool { return len(subscribed) == 1 || lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
 	require.NoError(t, blocker.Commit())
-	require.NoError(t, <-unsubscribed)
-	require.NoError(t, <-subscribed)
+	require.NoError(t, recv(t, unsubscribed))
+	require.NoError(t, recv(t, subscribed))
 
 	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe wins")
 }
@@ -276,8 +276,8 @@ func TestSubscribeWaitsForAnUnsubscribeThatCameFirst(t *testing.T) {
 	go func() { _, err := subscribe(); subscribed <- err }()
 	require.Eventually(t, func() bool { return len(subscribed) == 1 || lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
 	require.NoError(t, holder.Commit())
-	require.NoError(t, <-unsubscribed)
-	require.NoError(t, <-subscribed)
+	require.NoError(t, recv(t, unsubscribed))
+	require.NoError(t, recv(t, subscribed))
 
 	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe wins")
 }
@@ -310,7 +310,7 @@ func drainChasing(t *testing.T, queue string, run func(ctx context.Context, sub 
 		SELECT queue, args, now(), retry_policy FROM goque_jobs WHERE queue = $1 ORDER BY id LIMIT 1
 		RETURNING id`, queue).Scan(&newID))
 	require.NoError(t, blocker.Rollback())
-	require.NoError(t, <-done)
+	require.NoError(t, recv(t, done))
 
 	var exists bool
 	require.NoError(t, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM goque_jobs WHERE id = $1)`, newID).Scan(&exists))
@@ -361,7 +361,7 @@ func TestUnsubscribeWithAutoDrainBumpsTheVersionBeforeItDrains(t *testing.T) {
 	during, err := dialect.GetMetadata(ctx)
 	require.NoError(t, err)
 	require.NoError(t, blocker.Rollback())
-	require.NoError(t, <-done)
+	require.NoError(t, recv(t, done))
 	assert.Greater(t, during.Version, before.Version, "the version was not bumped while the drain ran")
 }
 
@@ -388,7 +388,7 @@ func TestUnsubscribeAfterAWaitedForSubscribeStillUnsubscribes(t *testing.T) {
 	go func() { unsubscribed <- sub.Unsubscribe(ctx) }()
 	require.Eventually(t, func() bool { return lockWaiting(t) >= 1 }, 10*time.Second, 5*time.Millisecond, "the Unsubscribe waits for the Subscribe")
 	require.NoError(t, tx.Commit())
-	require.NoError(t, <-unsubscribed)
+	require.NoError(t, recv(t, unsubscribed))
 
 	assert.Empty(t, mustSubscriptions(t, q), "the new subscription is unsubscribed")
 	assert.Equal(t, 0, queueJobs(t, "swap"), "the old subscription's jobs are drained")
@@ -427,9 +427,9 @@ func TestConcurrentDrainsLeaveNoJobWhenOneGivesUp(t *testing.T) {
 	}, 10*time.Second, 5*time.Millisecond)
 
 	cancelA()
-	require.Error(t, <-drained)
+	require.Error(t, recv(t, drained))
 	require.NoError(t, blocker.Commit())
-	require.NoError(t, <-unsubscribed)
+	require.NoError(t, recv(t, unsubscribed))
 
 	assert.False(t, finishedFirst, "the Unsubscribe finished while the first drain still held its batch")
 	assert.Empty(t, mustSubscriptions(t, q))
@@ -473,9 +473,9 @@ func TestSubscribeInAnOlderTransactionQueuedBehindAnUnsubscribe(t *testing.T) {
 	go func() { _, err := subscribe(bussql.NewContext(ctx, older)); subscribed <- err }()
 	require.Eventually(t, func() bool { return lockWaiting(t) >= 2 }, 10*time.Second, 5*time.Millisecond)
 	require.NoError(t, holder.Commit())
-	require.NoError(t, <-subscribed)
+	require.NoError(t, recv(t, subscribed))
 	require.NoError(t, older.Commit())
-	require.NoError(t, <-unsubscribed)
+	require.NoError(t, recv(t, unsubscribed))
 
 	assert.Len(t, mustSubscriptions(t, q), 1, "the later Subscribe leaves a live subscription")
 }
@@ -496,4 +496,17 @@ func TestUnsubscribeWithoutAutoDrainDeletesAtOnce(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM gobus_subscriptions WHERE queue = 'plain' AND deleted_at IS NULL`).Scan(&live))
 	assert.Zero(t, live)
 	assert.Equal(t, 3, queueJobs(t, "plain"), "without auto-drain the jobs stay")
+}
+
+// recv receives from ch, failing the test rather than hanging if nothing
+// comes, as when the code a test guards is broken.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing received in 10s")
+		panic("unreachable")
+	}
 }

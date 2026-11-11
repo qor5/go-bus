@@ -20,7 +20,7 @@ func TestFreshFlightsShareTheNextCall(t *testing.T) {
 	var f freshFlights
 	var calls atomic.Int64
 	release := make(chan struct{})
-	fn := func() (any, error) {
+	fn := func(context.Context) (any, error) {
 		n := calls.Add(1)
 		if n == 1 {
 			<-release
@@ -62,4 +62,68 @@ func waitingIn(fn string) int {
 		}
 	}
 	return n
+}
+
+// A call nobody waits for any more is cancelled; one that had not started is
+// dropped, so a caller arriving afterwards starts a call of its own instead of
+// sharing a cancelled one.
+func TestFreshFlightsDropsACallEveryWaiterLeft(t *testing.T) {
+	var f freshFlights
+	release := make(chan struct{})
+	running := make(chan struct{})
+	go func() {
+		_, _ = f.do(context.Background(), "k", func(context.Context) (any, error) {
+			close(running)
+			<-release
+			return "first", nil
+		})
+	}()
+	<-running
+
+	// a caller that gives up while waiting for the next call
+	ctx, cancel := context.WithCancel(context.Background())
+	left := make(chan error, 1)
+	go func() {
+		_, err := f.do(ctx, "k", func(ctx context.Context) (any, error) { return "abandoned", ctx.Err() })
+		left <- err
+	}()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-left, context.Canceled)
+
+	// a caller arriving now gets a call of its own, not the abandoned one
+	got := make(chan any, 1)
+	go func() {
+		v, err := f.do(context.Background(), "k", func(ctx context.Context) (any, error) { return "fresh", ctx.Err() })
+		require.NoError(t, err)
+		got <- v
+	}()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 2 }, time.Second, time.Millisecond)
+	close(release)
+	assert.Equal(t, "fresh", <-got)
+}
+
+// A running call whose callers have all given up is cancelled.
+func TestFreshFlightsCancelsARunningCallEveryWaiterLeft(t *testing.T) {
+	var f freshFlights
+	ended := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	waited := make(chan error, 1)
+	go func() {
+		_, err := f.do(ctx, "k", func(ctx context.Context) (any, error) {
+			<-ctx.Done() // a call that hangs until cancelled
+			ended <- ctx.Err()
+			return nil, ctx.Err()
+		})
+		waited <- err
+	}()
+	require.Eventually(t, func() bool { return waitingIn("(*freshFlights).do(") == 1 }, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-waited, context.Canceled)
+	select {
+	case err := <-ended:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("the running call was not cancelled after its only caller left")
+	}
 }

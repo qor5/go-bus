@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -126,33 +127,37 @@ type cacheDialect struct {
 	version int64 // Database version, accessed atomically
 }
 
-// sharedContext is the context of a call that several callers share: it
-// neither ends with the caller that started it, whose deadline or
-// cancellation would fail the others, nor runs in that caller's transaction,
-// which the others are not part of (and which may be over by then).
-func sharedContext(ctx context.Context) context.Context {
-	return bussql.NewContext(context.WithoutCancel(ctx), nil)
+// withoutTx drops the caller's transaction from ctx, for a call that callers
+// share: the others are not part of that transaction, which may also be over
+// by the time the call runs.
+func withoutTx(ctx context.Context) context.Context {
+	return bussql.NewContext(ctx, nil)
 }
 
-func (c *cacheDialect) checkVersion(ctx context.Context) (bool, error) {
-	sctx := sharedContext(ctx)
-	val, err := c.flights.do(ctx, "checkVersion", func() (any, error) {
-		meta, err := c.GetMetadata(sctx)
+// txOf returns the transaction ctx carries, if any.
+func txOf(ctx context.Context) *sql.Tx {
+	tx, _ := bussql.FromContext(ctx, nil).(*sql.Tx)
+	return tx
+}
+
+// checkVersion reads the metadata version, clearing the cache if it moved
+// on, and returns the version it read.
+func (c *cacheDialect) checkVersion(ctx context.Context) (int64, error) {
+	val, err := c.flights.do(withoutTx(ctx), "checkVersion", func(ctx context.Context) (any, error) {
+		meta, err := c.Dialect.GetMetadata(ctx)
 		if err != nil {
-			return false, errors.Wrap(err, "failed to get metadata")
+			return int64(0), errors.Wrap(err, "failed to get metadata")
 		}
 		if meta.Version != atomic.LoadInt64(&c.version) {
 			atomic.StoreInt64(&c.version, meta.Version)
 			c.cache.Clear()
-			return true, nil // Cache was cleared
 		}
-
-		return false, nil // Cache was not cleared
+		return meta.Version, nil
 	})
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	return val.(bool), nil
+	return val.(int64), nil
 }
 
 // getCachedSubscriptionsIfValid retrieves cached subscriptions if they exist and are not expired.
@@ -183,13 +188,20 @@ func bySubjectKey(version int64, subject string) string {
 
 // BySubject retrieves subscriptions for a subject, using cache when possible
 func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscription, error) {
-	subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(atomic.LoadInt64(&c.version), subject))
-	if found || atomic.LoadInt64(&c.version) == 0 {
-		cleared, err := c.checkVersion(ctx)
+	if txOf(ctx) != nil {
+		return c.bySubjectInTx(ctx, subject)
+	}
+
+	seen := atomic.LoadInt64(&c.version)
+	subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(seen, subject))
+	if found || seen == 0 {
+		version, err := c.checkVersion(ctx)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to check version")
 		}
-		if found && !cleared {
+		// compare with the version the cache was read under: another
+		// caller's check may have moved c.version on in between
+		if found && version == seen {
 			return subs, nil
 		}
 	}
@@ -197,10 +209,9 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 	// no second look at the cache here: freshFlights runs this only for
 	// callers that arrived before it started, and what another call cached
 	// may have been read before a Subscribe that committed before them
-	sctx := sharedContext(ctx)
-	val, err := c.flights.do(ctx, "BySubject:"+subject, func() (any, error) {
+	val, err := c.flights.do(withoutTx(ctx), "BySubject:"+subject, func(ctx context.Context) (any, error) {
 		version := atomic.LoadInt64(&c.version)
-		subs, err := c.Dialect.BySubject(sctx, subject)
+		subs, err := c.Dialect.BySubject(ctx, subject)
 		if err != nil {
 			return nil, err
 		}
@@ -213,12 +224,37 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 	return val.([]Subscription), nil
 }
 
+// bySubjectInTx looks subject's subscriptions up for a caller in a
+// transaction, on that transaction: a shared call on another connection
+// could wait forever for one when such callers use up the pool, and would
+// not see the transaction's own changes. The cache serves it while the
+// version the transaction reads is the cached one; what it reads itself is
+// not cached, as it may include the transaction's uncommitted changes.
+func (c *cacheDialect) bySubjectInTx(ctx context.Context, subject string) ([]Subscription, error) {
+	meta, err := c.Dialect.GetMetadata(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get metadata")
+	}
+	if meta.Version == atomic.LoadInt64(&c.version) {
+		if subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(meta.Version, subject)); found {
+			return subs, nil
+		}
+	}
+	return c.Dialect.BySubject(ctx, subject)
+}
+
 // freshFlights coalesces concurrent calls by key, like singleflight, except
 // that a caller never gets the result of a call that started before it
 // arrived: one that read the database earlier may miss a subscription
 // committed before the caller began. A caller that finds a call running
 // waits for the next one, which starts when the running one ends and which
 // every caller arriving meanwhile shares.
+//
+// A call runs with the values of the ctx of the caller that started it, but
+// does not end with that caller: it ends when it returns or when every caller
+// waiting for it has given up, so neither one caller's deadline fails the
+// others nor does a call that hangs (a dead connection) hold later callers
+// once its own have left.
 type freshFlights struct {
 	mu      sync.Mutex
 	running map[string]*freshCall
@@ -226,13 +262,21 @@ type freshFlights struct {
 }
 
 type freshCall struct {
-	fn   func() (any, error)
-	done chan struct{}
-	val  any
-	err  error
+	fn      func(context.Context) (any, error)
+	ctx     context.Context
+	cancel  context.CancelFunc
+	waiters int // guarded by freshFlights.mu
+	done    chan struct{}
+	val     any
+	err     error
 }
 
-func (f *freshFlights) do(ctx context.Context, key string, fn func() (any, error)) (any, error) {
+func newFreshCall(ctx context.Context, fn func(context.Context) (any, error)) *freshCall {
+	cctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	return &freshCall{fn: fn, ctx: cctx, cancel: cancel, done: make(chan struct{})}
+}
+
+func (f *freshFlights) do(ctx context.Context, key string, fn func(context.Context) (any, error)) (any, error) {
 	f.mu.Lock()
 	if f.running == nil {
 		f.running = map[string]*freshCall{}
@@ -241,17 +285,30 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func() (any, error
 	call := f.next[key]
 	switch {
 	case f.running[key] == nil:
-		call = &freshCall{fn: fn, done: make(chan struct{})}
+		call = newFreshCall(ctx, fn)
 		f.running[key] = call
 		go f.run(key, call)
 	case call == nil:
-		call = &freshCall{fn: fn, done: make(chan struct{})}
+		call = newFreshCall(ctx, fn)
 		f.next[key] = call
 	}
+	call.waiters++
 	f.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
+		f.mu.Lock()
+		call.waiters--
+		if call.waiters == 0 {
+			// nobody waits for it any more: end it, and if it has not
+			// started, drop it so that a caller arriving now starts afresh
+			// rather than share a cancelled call
+			if f.next[key] == call {
+				delete(f.next, key)
+			}
+			call.cancel()
+		}
+		f.mu.Unlock()
 		return nil, ctx.Err()
 	case <-call.done:
 		return call.val, call.err
@@ -259,7 +316,8 @@ func (f *freshFlights) do(ctx context.Context, key string, fn func() (any, error
 }
 
 func (f *freshFlights) run(key string, call *freshCall) {
-	call.val, call.err = call.fn()
+	call.val, call.err = call.fn(call.ctx)
+	call.cancel()
 	close(call.done)
 
 	f.mu.Lock()

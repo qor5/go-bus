@@ -182,6 +182,7 @@ type gatedSetCache struct {
 	armed   bool
 	in      chan struct{}
 	release chan struct{}
+	stored  chan struct{} // closed once the held Set is done
 }
 
 func (c *gatedSetCache) Set(k string, v []bus.Subscription) {
@@ -192,6 +193,7 @@ func (c *gatedSetCache) Set(k string, v []bus.Subscription) {
 	if armed {
 		close(c.in)
 		<-c.release
+		defer close(c.stored)
 	}
 	c.Cache.Set(k, v)
 }
@@ -207,7 +209,7 @@ func TestALookupCachedAfterTheVersionChangedIsNotServed(t *testing.T) {
 	rc, err := bus.NewRistrettoCache(nil)
 	require.NoError(t, err)
 	defer rc.Close()
-	gc := &gatedSetCache{Cache: bus.WrapRistrettoCache(rc), in: make(chan struct{}), release: make(chan struct{})}
+	gc := &gatedSetCache{Cache: bus.WrapRistrettoCache(rc), in: make(chan struct{}), release: make(chan struct{}), stored: make(chan struct{})}
 	b, err := bus.New(d, bus.WithCache(gc))
 	require.NoError(t, err)
 	defer func() { _ = b.Close() }()
@@ -234,6 +236,7 @@ func TestALookupCachedAfterTheVersionChangedIsNotServed(t *testing.T) {
 	require.NoError(t, err)
 	pub("zzz.topic")  // version check: learns the new version, clears
 	close(gc.release) // the held Set stores the stale list
+	<-gc.stored
 
 	for i := 0; i < 3; i++ {
 		var queues []string

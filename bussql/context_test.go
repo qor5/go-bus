@@ -2,10 +2,8 @@ package bussql_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/qor5/go-bus/bussql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,8 +43,7 @@ func TestFromContext_WithDBInContext(t *testing.T) {
 	db1 := setupTestDB(t)
 	defer func() { _ = db1.Close() }()
 
-	db2, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err, "Failed to open second database")
+	db2 := openOtherDB(t)
 	defer func() { _ = db2.Close() }()
 
 	ctx := context.Background()

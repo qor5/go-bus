@@ -65,6 +65,9 @@ type WorkerConfig struct {
 	MaxConcurrentPerformCount int
 
 	// ReconnectBackOff is the backoff strategy for reconnecting to the database.
+	// It keeps state and is not safe for concurrent use: give each consumer a
+	// WorkerConfig with a BackOff of its own (DefaultWorkerConfigFactory makes
+	// a new one per call) rather than sharing one config between consumers.
 	ReconnectBackOff backoff.BackOff
 }
 

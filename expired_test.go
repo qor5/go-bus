@@ -212,6 +212,9 @@ func TestUnsubscribeExpiredSparesASubscriptionMadeDuringTheDrain(t *testing.T) {
 
 	assert.Equal(t, 1, liveSubscriptions(t, "respawn"))
 	assert.Equal(t, 1, jobsAfter(t, "respawn", before), "the new subscription's job is kept")
+	var all int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM goque_jobs WHERE queue = 'respawn'`).Scan(&all))
+	assert.Equal(t, 1, all, "the old subscription's jobs are all drained")
 }
 
 // TestUnsubscribeExpiredKeepsAJobRetriedDuringTheDrain verifies that a job a

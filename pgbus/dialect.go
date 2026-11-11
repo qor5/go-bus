@@ -145,19 +145,25 @@ func (d *Dialect) UnsubscribeExpired(ctx context.Context, limit int) (int, error
 // unsubscribeExpired unsubscribes subscription id if it is still there and
 // expired, and reports whether it did. By id: an expired subscription cannot
 // be revived, and one made since for the same queue and pattern is a new row.
-// Its row is locked while the drain's bound is read, so a Subscribe that
-// replaces it commits after that, and its jobs are above the bound (see
-// unsubscribeInBatches).
+// Its row is updated (locked) while the drain's bound is read, so a
+// Subscribe that replaces it commits after that, and its jobs are above the
+// bound (see unsubscribeInBatches).
 func (d *Dialect) unsubscribeExpired(ctx context.Context, id int64) (bool, error) {
 	var queue, pattern string
 	var autoDrain, done bool
 	var upTo int64
 	err := d.ExecTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Expired to the epoch, as Unsubscribe does, rather than only
+		// locked: a Heartbeat whose transaction began before the
+		// subscription expired would otherwise still renew it after this
+		// commits, and the subscription be deleted with the Heartbeat
+		// reported as a success. The epoch keeps it first in line, so a
+		// call that is cut short is resumed by the next one.
 		var optionsData []byte
 		err := tx.QueryRowContext(ctx,
-			`SELECT queue, pattern, options FROM gobus_subscriptions
+			`UPDATE gobus_subscriptions SET expires_at = 'epoch', updated_at = NOW()
 			 WHERE id = $1 AND deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW()
-			 FOR UPDATE`, id).Scan(&queue, &pattern, &optionsData)
+			 RETURNING queue, pattern, options`, id).Scan(&queue, &pattern, &optionsData)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // unsubscribed or replaced meanwhile
 		}

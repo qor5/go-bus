@@ -149,8 +149,10 @@ go func() {
         sub.Heartbeat(ctx)
         // Unsubscribe the subscriptions of instances that died without
         // unsubscribing; nothing else removes expired subscriptions.
-        // (b is the bus.Bus from pgbus.New, named bus above.)
-        if u, ok := b.(bus.ExpiredUnsubscriber); ok {
+        // (bus.ExpiredUnsubscriber, spelled out: the variable bus hides the package.)
+        if u, ok := bus.(interface {
+            UnsubscribeExpired(context.Context) (int, error)
+        }); ok {
             u.UnsubscribeExpired(ctx)
         }
     }

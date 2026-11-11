@@ -417,3 +417,81 @@ func TestUnsubscribeExpiredNeedsADialectThatCan(t *testing.T) {
 		})
 	}
 }
+
+// A subscription renewed between the call listing it and locking it is left
+// alone: the lock rechecks that it is expired.
+func TestUnsubscribeExpiredLeavesASubscriptionRenewedBeforeItsTurn(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+	q := b.Queue("renewed")
+	_, err := q.Subscribe(ctx, "renewed.topic", bus.WithTTL(time.Minute))
+	require.NoError(t, err)
+	expire(t, "renewed")
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.Exec(`SELECT id FROM gobus_subscriptions WHERE queue = 'renewed' AND deleted_at IS NULL FOR UPDATE`)
+	require.NoError(t, err)
+
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() { n, err := unsubscribeExpired(ctx, b); done <- result{n, err} }()
+	waitForLockWaiters(t, 1)
+	_, err = tx.Exec(`UPDATE gobus_subscriptions SET expires_at = NOW() + INTERVAL '1 hour' WHERE queue = 'renewed' AND deleted_at IS NULL`)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	r := <-done
+	require.NoError(t, r.err)
+	assert.Equal(t, 0, r.n)
+	assert.Equal(t, 1, liveSubscriptions(t, "renewed"))
+}
+
+// A Heartbeat in a transaction that began before the subscription expired
+// either fails or keeps the subscription: it never succeeds while the
+// subscription is soft-deleted anyway. The subscription is marked expired
+// before it is drained, which the Heartbeat's UPDATE then sees.
+func TestUnsubscribeExpiredDoesNotDeleteAHeartbeatSucceededOn(t *testing.T) {
+	b, _, _ := setupBusAndQueues(t)
+	ctx := context.Background()
+	q := b.Queue("beat")
+	sub, err := q.Subscribe(ctx, "beat.topic", bus.WithTTL(time.Minute), bus.WithAutoDrain(true))
+	require.NoError(t, err)
+	publishN(t, b, "beat.topic", 1500)
+
+	beat, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = beat.Rollback() }()
+	var started time.Time
+	require.NoError(t, beat.QueryRow(`SELECT NOW()`).Scan(&started))
+	time.Sleep(50 * time.Millisecond)
+	// expired now, but not as of the start of the Heartbeat's transaction
+	_, err = db.Exec(`UPDATE gobus_subscriptions SET expires_at = $1 WHERE queue = 'beat' AND deleted_at IS NULL`, started.Add(10*time.Millisecond))
+	require.NoError(t, err)
+
+	blocker := lockJob(t, "beat", 999)
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() { n, err := unsubscribeExpired(ctx, b); done <- result{n, err} }()
+	waitForLockWaiters(t, 1) // the drain waits on the job
+
+	beatErr := sub.Heartbeat(bussql.NewContext(ctx, beat))
+	require.NoError(t, beat.Commit())
+	require.NoError(t, blocker.Commit())
+	r := <-done
+	require.NoError(t, r.err)
+
+	if beatErr == nil {
+		assert.Equal(t, 1, liveSubscriptions(t, "beat"), "the Heartbeat succeeded, yet the subscription was deleted")
+	} else {
+		assert.ErrorIs(t, beatErr, bus.ErrSubscriptionNotFound)
+		assert.Equal(t, 0, liveSubscriptions(t, "beat"))
+	}
+}

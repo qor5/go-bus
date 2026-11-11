@@ -110,7 +110,11 @@ const UnsubscribeExpiredLimit = 100
 // retried are kept, as Drain keeps them). It handles at most
 // UnsubscribeExpiredLimit subscriptions a call, oldest first, so call it
 // periodically (from a heartbeat loop, say); nothing else removes expired
-// subscriptions. It returns how many it unsubscribed.
+// subscriptions. It returns how many it unsubscribed; with an error, how
+// many it had unsubscribed before it (one whose last batch committed as the
+// error came may be missing). A subscription that a Subscribe to the same
+// queue and pattern replaces while it is being drained is not counted,
+// though its jobs are all drained.
 //
 // Unlike the other methods it never joins a transaction ctx carries: it
 // commits as it goes (see the dialect for how). A dialect that cannot do this

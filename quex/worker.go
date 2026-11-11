@@ -58,12 +58,14 @@ func StartWorker(ctx context.Context, workerOptions que.WorkerOptions, options .
 	if ctx.Err() != nil {
 		return nil, errors.WithStack(ctx.Err())
 	}
-	opts := StartWorkerOptions{}
-	for _, option := range options {
-		option(&opts)
-	}
-	if opts.ReconnectBackOff == nil {
-		opts.ReconnectBackOff = DefaultReconnectBackOffFactory()
-	}
-	return supervisor.StartWorker(ctx, workerOptions, func(o *StartWorkerOptions) { *o = opts })
+	// one option that applies the caller's onto supervisor's own options, so
+	// whatever supervisor sets up first is kept
+	return supervisor.StartWorker(ctx, workerOptions, func(o *StartWorkerOptions) {
+		for _, option := range options {
+			option(o)
+		}
+		if o.ReconnectBackOff == nil {
+			o.ReconnectBackOff = DefaultReconnectBackOffFactory()
+		}
+	})
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/qor5/go-bus/quex"
+	"github.com/qor5/go-que/supervisor"
 )
 
 // recordingOnStop captures the OnStop callback invocations.
@@ -220,4 +221,32 @@ func TestStartWorker_OnlyAWorkerThatLockedStartsTheBackOffOver(t *testing.T) {
 	require.Eventually(t, func() bool { next, _ := spy.counts(); return next >= 5 }, 5*time.Second, time.Millisecond)
 	_, reset := spy.counts()
 	require.Equal(t, 1, reset, "only the worker that locked starts the backoff over")
+}
+
+// quex forwards to supervisor: the error is the same value, and replacing
+// quex.DefaultReconnectBackOffFactory still sets the backoff of workers
+// started through quex without one, as it did.
+func TestQuexForwardsToSupervisor(t *testing.T) {
+	require.Same(t, supervisor.ErrReconnectBackOffStopped, quex.ErrReconnectBackOffStopped)
+
+	saved := quex.DefaultReconnectBackOffFactory
+	t.Cleanup(func() { quex.DefaultReconnectBackOffFactory = saved })
+	quex.DefaultReconnectBackOffFactory = func() backoff.BackOff { return &backoff.StopBackOff{} }
+
+	ctrl, err := quex.StartWorker(context.Background(), que.WorkerOptions{
+		Queue:                     "test-queue",
+		Mutex:                     failingMutex{},
+		Perform:                   noopPerform,
+		MaxLockPerSecond:          100,
+		MaxPerformPerSecond:       100,
+		MaxConcurrentPerformCount: 1,
+	})
+	require.NoError(t, err)
+	select {
+	case <-ctrl.Done(): // StopBackOff gave up at the first failure
+	case <-time.After(5 * time.Second):
+		_ = ctrl.Stop(context.Background())
+		t.Fatal("the replaced quex.DefaultReconnectBackOffFactory was not used")
+	}
+	require.ErrorIs(t, ctrl.Err(), quex.ErrReconnectBackOffStopped)
 }

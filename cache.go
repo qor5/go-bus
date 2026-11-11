@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/pkg/errors"
 	"github.com/rs/xid"
+
+	"github.com/qor5/go-bus/bussql"
 )
 
 var _ Dialect = (*cacheDialect)(nil)
@@ -123,9 +126,18 @@ type cacheDialect struct {
 	version int64 // Database version, accessed atomically
 }
 
+// sharedContext is the context of a call that several callers share: it
+// neither ends with the caller that started it, whose deadline or
+// cancellation would fail the others, nor runs in that caller's transaction,
+// which the others are not part of (and which may be over by then).
+func sharedContext(ctx context.Context) context.Context {
+	return bussql.NewContext(context.WithoutCancel(ctx), nil)
+}
+
 func (c *cacheDialect) checkVersion(ctx context.Context) (bool, error) {
+	sctx := sharedContext(ctx)
 	val, err := c.flights.do(ctx, "checkVersion", func() (any, error) {
-		meta, err := c.GetMetadata(ctx)
+		meta, err := c.GetMetadata(sctx)
 		if err != nil {
 			return false, errors.Wrap(err, "failed to get metadata")
 		}
@@ -161,11 +173,17 @@ func (c *cacheDialect) getCachedSubscriptionsIfValid(subject string) ([]Subscrip
 	return nil, false
 }
 
+// bySubjectKey is the cache key of subject's subscriptions read under the
+// metadata version: a lookup caches what it read under the version it began
+// with, so a list read before a change is never served after it, even if it
+// is stored after the change cleared the cache.
+func bySubjectKey(version int64, subject string) string {
+	return fmt.Sprintf("v%d:BySubject:%s", version, subject)
+}
+
 // BySubject retrieves subscriptions for a subject, using cache when possible
 func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscription, error) {
-	cacheKey := "BySubject:" + subject
-
-	subs, found := c.getCachedSubscriptionsIfValid(cacheKey)
+	subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(atomic.LoadInt64(&c.version), subject))
 	if found || atomic.LoadInt64(&c.version) == 0 {
 		cleared, err := c.checkVersion(ctx)
 		if err != nil {
@@ -176,28 +194,17 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 		}
 	}
 
-	val, err := c.flights.do(ctx, cacheKey, func() (any, error) {
-		// Double-check cache after acquiring lock (another goroutine might have updated it)
-		if subs, found := c.getCachedSubscriptionsIfValid(cacheKey); found {
-			return subs, nil
-		}
-
-		currentVersion := atomic.LoadInt64(&c.version)
-
-		subs, err := c.Dialect.BySubject(ctx, subject)
+	// no second look at the cache here: freshFlights runs this only for
+	// callers that arrived before it started, and what another call cached
+	// may have been read before a Subscribe that committed before them
+	sctx := sharedContext(ctx)
+	val, err := c.flights.do(ctx, "BySubject:"+subject, func() (any, error) {
+		version := atomic.LoadInt64(&c.version)
+		subs, err := c.Dialect.BySubject(sctx, subject)
 		if err != nil {
 			return nil, err
 		}
-
-		// Only cache if version hasn't changed during query
-		if currentVersion == atomic.LoadInt64(&c.version) {
-			c.cache.Set(cacheKey, subs)
-		}
-		// else {
-		// Version changed, data might be stale, don't cache
-		// But still return the data we fetched to avoid another query
-		// }
-
+		c.cache.Set(bySubjectKey(version, subject), subs)
 		return subs, nil
 	})
 	if err != nil {

@@ -2582,8 +2582,13 @@ func TestConsumeSurvivesADroppedConnection(t *testing.T) {
 	require.NoError(t, err)
 	got := make(chan string, 16)
 	consumer, err := queue.StartConsumer(ctx, func(ctx context.Context, msg *bus.Inbound) error {
+		// report a message only once it is destroyed, so cutting the
+		// connections cannot abort its Destroy and have it delivered again
+		if err := msg.Destroy(ctx); err != nil {
+			return err
+		}
 		got <- string(msg.Payload)
-		return msg.Destroy(ctx)
+		return nil
 	}, bus.WithWorkerConfig(&bus.WorkerConfig{MaxLockPerSecond: 50, MaxBufferJobsCount: 10, MaxPerformPerSecond: 100, MaxConcurrentPerformCount: 1}))
 	require.NoError(t, err)
 	defer func() { _ = consumer.Stop(context.Background()) }()

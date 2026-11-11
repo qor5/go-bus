@@ -303,7 +303,11 @@ const backgroundCheckTimeout = 30 * time.Second
 // caller waiting for it has given up, or at the latest deadline among them,
 // unless one of them has no deadline, as a call on that caller's own ctx
 // would. So no caller's deadline cuts the call short for another, and a call
-// that hangs (a dead connection) holds nobody past their own deadlines.
+// that hangs (a dead connection) holds nobody past their own deadlines. Such
+// a call with a caller without a deadline runs until the driver or TCP gives
+// up on the connection, and callers of the key meanwhile wait for the next
+// call behind it and fail at their deadlines, as they did on main, where a
+// call ran on the first caller's ctx.
 type freshFlights struct {
 	mu      sync.Mutex
 	running map[string]*freshCall

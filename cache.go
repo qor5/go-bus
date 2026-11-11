@@ -122,9 +122,10 @@ func CacheDecorator(cache Cache) DialectDecorator {
 // cacheDialect caches subscription lookups by subject
 type cacheDialect struct {
 	Dialect
-	cache   Cache
-	flights freshFlights
-	version int64 // Database version, accessed atomically
+	cache      Cache
+	flights    freshFlights
+	version    int64 // Database version, accessed atomically
+	refreshing int32 // a background version check runs, accessed atomically
 }
 
 // withoutTx drops the caller's transaction from ctx, for a call that callers
@@ -227,21 +228,58 @@ func (c *cacheDialect) BySubject(ctx context.Context, subject string) ([]Subscri
 // bySubjectInTx looks subject's subscriptions up for a caller in a
 // transaction, on that transaction: a shared call on another connection
 // could wait forever for one when such callers use up the pool, and would
-// not see the transaction's own changes. The cache serves it while the
-// version the transaction reads is the cached one; what it reads itself is
-// not cached, as it may include the transaction's uncommitted changes.
+// not see the transaction's own changes.
+//
+// The cache serves it, and takes what it reads, while the version the
+// transaction reads is the one last read outside any transaction
+// (c.version): then the transaction has not changed the subscriptions,
+// since a change bumps that version on the same row, which nobody else can
+// commit a bump of while the transaction holds it uncommitted. (A Heartbeat
+// in it, which does not bump the version, may leave a later expiry in the
+// cache if the transaction rolls back.) If c.version is another one, a check
+// outside the transaction is started in the background, so that callers
+// who only publish in transactions get the cache too.
 func (c *cacheDialect) bySubjectInTx(ctx context.Context, subject string) ([]Subscription, error) {
 	meta, err := c.GetMetadata(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get metadata")
 	}
-	if meta.Version == atomic.LoadInt64(&c.version) {
-		if subs, found := c.getCachedSubscriptionsIfValid(bySubjectKey(meta.Version, subject)); found {
+	key := bySubjectKey(meta.Version, subject)
+	known := meta.Version == atomic.LoadInt64(&c.version)
+	if known {
+		if subs, found := c.getCachedSubscriptionsIfValid(key); found {
 			return subs, nil
 		}
+	} else {
+		c.checkVersionInBackground()
 	}
-	return c.Dialect.BySubject(ctx, subject)
+	subs, err := c.Dialect.BySubject(ctx, subject)
+	if err != nil {
+		return nil, err
+	}
+	if known {
+		c.cache.Set(key, subs)
+	}
+	return subs, nil
 }
+
+// checkVersionInBackground starts a version check unless one it started
+// still runs. Nobody waits for it, so it cannot hold a caller in a
+// transaction waiting for a second connection.
+func (c *cacheDialect) checkVersionInBackground() {
+	if !atomic.CompareAndSwapInt32(&c.refreshing, 0, 1) {
+		return
+	}
+	go func() {
+		defer atomic.StoreInt32(&c.refreshing, 0)
+		ctx, cancel := context.WithTimeout(context.Background(), backgroundCheckTimeout)
+		defer cancel()
+		_, _ = c.checkVersion(ctx)
+	}()
+}
+
+// backgroundCheckTimeout bounds a version check nobody waits for.
+const backgroundCheckTimeout = 30 * time.Second
 
 // freshFlights coalesces concurrent calls by key, like singleflight, except
 // that a caller never gets the result of a call that started before it
